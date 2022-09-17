@@ -18,11 +18,11 @@
 #include<stdexcept>
 #include <functional>
 #include<optional>
+#include<fstream>
 
 
 const int WIDTH = 800;
 const int HEIGTH = 600;
-
 
 const std::vector<const char*> gb_validationLayers = {
 	"VK_LAYER_KHRONOS_validation",
@@ -117,26 +117,37 @@ public:
 
 private:
 
-	GLFWwindow* p_window;
-	VkInstance m_instance;
+	GLFWwindow* p_window;  //glfw 窗体
+	VkInstance m_instance;	// Vulkan 实例
 
-	VkDebugUtilsMessengerEXT m_debugMessengerCallback;
+	VkDebugUtilsMessengerEXT m_debugMessengerCallback;  // 验证层 dubg messenger
 	VkDebugReportCallbackEXT m_debugReportCallback;  // depercate
 
-	VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
-	VkDevice m_logicalDevice;
+	VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE; // 物理显卡设备
+	VkDevice m_logicalDevice;	// 逻辑显卡设备
 
-	VkQueue m_presentQueue;
-	VkQueue m_graphicsQueue;
+	VkQueue m_presentQueue;	// 展示端口
+	VkQueue m_graphicsQueue;	// 图形端口
 
 	VkSurfaceKHR m_surface;
 
-	VkSwapchainKHR m_swapChain;
-	std::vector<VkImage> m_swapChainImages;
+	VkSwapchainKHR m_swapChain; // 包含一系列图片
+
+	std::vector<VkFramebuffer> m_swapChainFrameBuffers; // VkFramebuffer:容纳renderpass 的目标图片（本身）由VkImage而来
+	std::vector<VkImage> m_swapChainImages;	// VKImage: 一个可以读写的Texture
 	VkFormat m_swapChainImageFormat;
 	VkExtent2D m_swapChainExtent;
-
 	std::vector<VkImageView> m_swapChainImageViews;
+
+	VkPipeline m_graphicsPipeLine;	// drawing 时 GPU 需要的状态信息集合结构体，包含如shader,光栅化,depth等
+	VkRenderPass m_renderPass;	// 包含渲染等所有drawing命令在内完成, attachhment,subpass
+	VkPipelineLayout m_pipelineLayout;	// 管线布局 linera 、 Optimal(tile平铺)·
+
+	VkCommandPool m_commandPool;	// 命令池：储存缓存区的内存 不能直接调用函数进行绘制或内存操作等， 而是写入命令缓存区来调用
+	std::vector<VkCommandBuffer> m_commandBuffers; // 命令缓冲区
+
+	VkSemaphore m_imageAvailableSemaphore;	//协调交换链事件的信号量，不能像 栅栏(?Fench) 一样进入栅栏状态， 主要用于队列内或跨命令队列同步操作
+	VkSemaphore m_renderFinishedSemaphore;	//栅栏主要用于 引用程序 自身与渲染操作同步
 
 private:
 
@@ -158,7 +169,12 @@ private:
 		createLogicalDevice();
 		createSwapChain();
 		createImageViews();
+		createRenderPass();
 		createGraphicsPipeline();
+		createFrameBuffers();
+		createCommandPool();
+		createCommandBuffers();
+		createSemphores();
 	}
 
 	void mainLoop()
@@ -166,21 +182,42 @@ private:
 		while (!glfwWindowShouldClose(p_window))
 		{
 			glfwPollEvents();
+
+			drawFrame();
+
+			vkDeviceWaitIdle(m_logicalDevice);
 		}
 	}
 
 	void cleanup()
-	{
+	{	/* 与create 的顺序相反 */
+
+		vkDestroySemaphore(m_logicalDevice, m_renderFinishedSemaphore, nullptr);
+		vkDestroySemaphore(m_logicalDevice, m_imageAvailableSemaphore, nullptr);
+		vkDestroyCommandPool(m_logicalDevice, m_commandPool, nullptr);
+
+		for (size_t i = 0; i < m_swapChainFrameBuffers.size(); ++i)
+		{
+			vkDestroyFramebuffer(m_logicalDevice, m_swapChainFrameBuffers[i], nullptr);
+		}
+
+		vkDestroyPipeline(m_logicalDevice, m_graphicsPipeLine, nullptr);
+		vkDestroyPipelineLayout(m_logicalDevice, m_pipelineLayout, nullptr);
+		vkDestroyRenderPass(m_logicalDevice, m_renderPass, nullptr);
+
 		for (size_t i = 0; i < m_swapChainImageViews.size(); ++i)
 		{
 			vkDestroyImageView(m_logicalDevice, m_swapChainImageViews[i], nullptr);
 		}
+
 		vkDestroySwapchainKHR(m_logicalDevice, m_swapChain, nullptr);
+
 		if (enableValidationLayers)
 		{
 			DestoryDebugUtilsMessengerEXT(m_instance, m_debugMessengerCallback, nullptr);
 		}
 		// DestoryDebugReportCallbackEXT(m_instance, m_debugReportCallback, nullptr);
+
 		vkDestroyDevice(m_logicalDevice, nullptr);
 		vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
 		vkDestroyInstance(m_instance, nullptr);
@@ -375,6 +412,7 @@ private:
 			swapChainCreateInfo.imageArrayLayers = 1;  // 不是3D 应用， 图像层数为1
 			swapChainCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
+
 			QueueFamilyIndices indices = findQueueFamilies(m_physicalDevice);
 
 			uint32_t queueFamilyIndices[] = {
@@ -402,13 +440,15 @@ private:
 			swapChainCreateInfo.presentMode = presentMode;
 			swapChainCreateInfo.clipped = VK_TRUE;
 
+
 			swapChainCreateInfo.oldSwapchain = VK_NULL_HANDLE; // 回收old swapchain 资源的引用句柄
+
+			// Create swapchain
+			if (vkCreateSwapchainKHR(m_logicalDevice, &swapChainCreateInfo, nullptr, &m_swapChain) != VK_SUCCESS) {
+				throw std::runtime_error("faild to create swap chain!");
+			}
 		}
 
-		// Create swapchain
-		if (vkCreateSwapchainKHR(m_logicalDevice, &swapChainCreateInfo, nullptr, &m_swapChain) != VK_SUCCESS) {
-			throw std::runtime_error("faild to create swap chain!");
-		}
 
 		// Init swapChainImages
 		vkGetSwapchainImagesKHR(m_logicalDevice, m_swapChain, &imageCount, nullptr);
@@ -445,11 +485,588 @@ private:
 				imageViewCreateInfo.subresourceRange.layerCount = 1;
 			}
 
-			if (vkCreateImageView(m_logicalDevice, &imageViewCreateInfo, nullptr, &m_swapChainImageViews[1]) != VK_SUCCESS)
+			if (vkCreateImageView(m_logicalDevice, &imageViewCreateInfo, nullptr, &m_swapChainImageViews[i]) != VK_SUCCESS)
 			{
 				throw std::runtime_error("failed to create image view!");
 			}
 		}
+	}
+
+	void createRenderPass()
+	{
+		VkAttachmentDescription colorAttachment = {};
+		{
+			colorAttachment.format = m_swapChainImageFormat;	// 与交换链中的图像格式匹配
+			colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;	// 不做多重采样
+
+			/*  用于颜色和深度数据
+			loadOp和storeOp决定了渲染前和渲染后数据在对应附件的操作行为。对于 loadOp 我们有如下选项：
+				VK_ATTACHMENT_LOAD_OP_LOAD : 保存已经存在于当前附件的内容
+				VK_ATTACHMENT_LOAD_OP_CLEAR : 起始阶段以一个常量清理附件内容
+				VK_ATTACHMENT_LOAD_OP_DONT_CARE : 存在的内容未定义，忽略它们
+			在绘制新的一帧内容之前，我们要做的是使用清理操作来清理帧缓冲区framebuffer为黑色。同时对于 storeOp 仅有两个选项：
+				VK_ATTACHMENT_STORE_OP_STORE : 渲染的内容会存储在内存，并在之后进行读取操作
+				VK_ATTACHMENT_STORE_OP_DONT_CARE : 帧缓冲区的内容在渲染操作完毕后设置为undefined
+				我们要做的是渲染一个三角形在屏幕上，所以我们选择存储操作。
+			*/
+			colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+			/*
+			loadOp和storeOp应用在颜色和深度数据，同时stencilLoadOp / stencilStoreOp应用在模版数据。我们的应用程序不会做任何模版缓冲区的操作，所以它的loading和storing无关紧要。
+			*/
+			colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+
+			/* 用于模板数据
+			纹理和帧缓冲区在Vulkan中通常用VkImage 对象配以某种像素格式来代表。但是像素在内存中的布局可以基于预要对image图像进行的操作发生内存布局的变化。
+			一些常用的布局 :
+			VK_IMAGE_LAYOUT_COLOR_ATTACHMET_OPTIMAL: 图像作为颜色附件
+			VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : 图像在交换链中被呈现
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : 图像作为目标，用于内存COPY操作*/
+			colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;		// Bug fix: init-undef sub-attachOptimal final-presentSrcKhr 
+			colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+		}
+
+		// 子渲染通道需要 对前面定义一个或多个 attachment 的引用
+		VkAttachmentReference colorAttachmentRef = {};
+		colorAttachmentRef.attachment = 0;  // attchment 的索引
+		colorAttachmentRef.layout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL;
+
+		// Subpass 子通道
+		VkSubpassDescription subpass = {};
+		{
+			subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+			subpass.colorAttachmentCount = 1;
+			subpass.pColorAttachments = &colorAttachmentRef; // 在fragShader 中在使用 layout(locaiton=0)out vec4 outColor 来引用
+			/*可以被子通道引用的附件类型如下:
+				pInputAttachments: 附件从着色器中读取
+				pResolveAttachments : 附件用于颜色附件的多重采样
+				pDepthStencilAttachment : 附件用于深度和模版数据
+				pPreserveAttachments : 附件不被子通道使用，但是数据被保存*/
+		}
+
+		//  解决在管线的起始阶段 主渲染 和 子渲染通道 在进行转换处理时 没有获取图像的问题, 指定依赖关系、从属、操作发生的事件
+		VkSubpassDependency dependency = {};
+		{
+			dependency.srcSubpass = VK_SUBPASS_EXTERNAL; // 隐式子通道,取决于在 是否在 srcSubpass/dstSubpass 中指定
+			dependency.dstSubpass = 0;	// subpass 索引
+
+			dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // 等待 swapchain 完成对应图像的读取操作
+			dependency.srcAccessMask = 0;
+
+			dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // 等待 swapchain output
+			dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; // 阻止读写操作直到直到需要输入颜色时
+		}
+
+		// RenderPass creatInfo 渲染通道
+		VkRenderPassCreateInfo renderPassCreateInfo = {};
+		{
+			renderPassCreateInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+
+			renderPassCreateInfo.attachmentCount = 1;
+			renderPassCreateInfo.pAttachments = &colorAttachment;
+
+			renderPassCreateInfo.subpassCount = 1;
+			renderPassCreateInfo.pSubpasses = &subpass;
+
+			renderPassCreateInfo.dependencyCount = 1;
+			renderPassCreateInfo.pDependencies = &dependency;
+		}
+
+		// 创建 m_renderPass
+		if (vkCreateRenderPass(m_logicalDevice, &renderPassCreateInfo, nullptr, &m_renderPass) != VK_SUCCESS) {
+			throw std::runtime_error("failed to crete render pass!");
+		}
+
+
+	}
+
+	void createGraphicsPipeline()
+	{
+		/************************** Shader Stages ***********************************************/
+
+		/* shader 模块 定义了图形管线可编程阶段的功能    */
+
+		// input binary SPIR-V codes
+		auto vertShaderCode = readFile("shaders/vert.spv");
+		auto fragShaderCode = readFile("shaders/frag.spv");
+
+		// Compile Module
+		auto vertShaderModule = createShaderModule(vertShaderCode);
+		auto fragShaderModule = createShaderModule(fragShaderCode);
+
+		VkPipelineShaderStageCreateInfo vertShaderStageInfo = {};
+		{
+			vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+			vertShaderStageInfo.module = vertShaderModule;
+			vertShaderStageInfo.pName = "main";  // 调用的主函数（入口）
+		}
+		VkPipelineShaderStageCreateInfo fragShaderStageInfo = {};
+		{
+			fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+			fragShaderStageInfo.module = fragShaderModule;
+			fragShaderStageInfo.pName = "main";  // 调用的主函数（入口）
+		}
+
+		// Shader Stage cretInfo
+		VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo,fragShaderStageInfo };
+
+
+		// vertx input State cretInfo
+		VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
+		{
+			vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+			vertexInputInfo.vertexBindingDescriptionCount = 0;
+			vertexInputInfo.pVertexBindingDescriptions = nullptr; // Optional
+			vertexInputInfo.vertexAttributeDescriptionCount = 0;
+			vertexInputInfo.pVertexAttributeDescriptions = nullptr; //Optional
+		}
+		/************************** Shader Stages ***********************************************/
+
+
+		/****************************** Fix-function State *****************************************/
+
+		/* 用结构体定义固定管线功能， 比如： 输入装配、viewport、裁剪、光栅化、blending、采样等*/
+
+
+		// Assembly state cretInfo ( Triangle format in this example)
+		VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
+		{
+			inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+			inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+			inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+			//VkPipelineInputAssemblyStateCreateInfo结构体描述两件事情:顶点数据以什么类型的几何图元拓扑进行绘制及是否启用顶点索重新开始图元。图元的拓扑结构类型topology枚举值如下:
+			//VK_PRIMITIVE_TOPOLOGY_POINT_LIST: 顶点到点
+			//VK_PRIMITIVE_TOPOLOGY_LINE_LIST : 两点成线，顶点不共用
+			//VK_PRIMITIVE_TOPOLOGY_LINE_STRIP : 两点成线，每个线段的结束顶点作为下一个线段的开始顶点
+			//VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : 三点成面，顶点不共用
+			//VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : 每个但教训的第二个、第三个顶点都作为下一个三角形的前两个顶点
+		}
+
+		// Viewport 描述 图像转换（映射）到 framebuffer（窗口） 的对应部分 包含入点xy，宽高hw，和深度minmax
+		VkViewport viewport = {};
+		{
+			viewport.x = 0.0f;
+			viewport.y = 0.0f;
+			viewport.width = (float)m_swapChainExtent.width;
+			viewport.height = (float)m_swapChainExtent.height;
+			viewport.minDepth = 0.0f;
+			viewport.maxDepth = 1.0f;
+		}
+
+		// Scissor 裁剪 定义哪些区域内的像素被储存
+		VkRect2D scissor = {};
+		{
+			scissor.offset = { 0,0 };
+			scissor.extent = m_swapChainExtent; // 与视点保持一致
+		}
+
+		// Viewport State cretInfo 汇总使用裁剪和视点
+		VkPipelineViewportStateCreateInfo viewportState = {};
+		{
+			viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+			viewportState.viewportCount = 1;
+			viewportState.pViewports = &viewport;
+			viewportState.scissorCount = 1;
+			viewportState.pScissors = &scissor;
+		}
+
+
+		// Resterization State cretInfo 光栅化，顶点塑性、tansmit 图像到 fragmentShader 着色、执行深度测试depth testing、面裁剪和裁剪测试，决定是否输出 整个图元拓扑 或是 边框（框线渲染）
+		VkPipelineRasterizationStateCreateInfo rasterizer = {};
+		{
+			rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+			rasterizer.depthClampEnable = VK_FALSE;
+
+			//超过远近裁剪面的图元会进行收敛，而不丢弃，在如阴影贴图情况下有用，需GPU support; 否则会进士几何图元输出到framebuffer
+			rasterizer.rasterizerDiscardEnable = VK_FALSE;
+
+			//polygonMode决定几何产生图片的内容。下列有效模式:
+			//VK_POLYGON_MODE_FILL: 多边形区域填充
+			//VK_POLYGON_MODE_LINE : 多边形边缘线框绘制
+			//VK_POLYGON_MODE_POINT : 多边形顶点作为描点绘制
+			//使用任何模式填充需要开启GPU功能。
+			rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+
+			rasterizer.lineWidth = 1.0f;
+			rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;	// culling/font faces/call back facess/all 面裁剪的方式
+			rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE; // 顺时针/逆时针 顶点绘制顺序
+
+			// 深度值 config 这次设为false
+			rasterizer.depthBiasEnable = VK_FALSE;
+			rasterizer.depthBiasConstantFactor = 0.0f; // Optional
+			rasterizer.depthBiasClamp = 0.0f;	// Optional
+			rasterizer.depthBiasSlopeFactor = 0.0f; // Optional
+		}
+
+		// Multisample State cretInfo 多重采样 这里不使用
+		VkPipelineMultisampleStateCreateInfo multisampliing = {};
+		{
+			multisampliing.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+			multisampliing.sampleShadingEnable = VK_FALSE;
+			multisampliing.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+			multisampliing.minSampleShading = 1.0f; // Optional
+			multisampliing.pSampleMask = nullptr; // Optional
+			multisampliing.alphaToCoverageEnable = VK_FALSE; // Optional
+			multisampliing.alphaToOneEnable = VK_FALSE; // Optional
+		}
+
+		// Blender 将fragment 输出的颜色与旧的 framebuffer 中存在的颜色进行混合： 混合（比例混合为新的颜色）或 位操作 , 这里采用第一种方式
+		VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
+		{
+			colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+			colorBlendAttachment.blendEnable = VK_FALSE;
+
+			if (colorBlendAttachment.blendEnable) {
+				// finalcolor = newcolor & colorwritemask
+				colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE; // Optional
+				colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO; // Optional
+				colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD; // Optional
+				colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; // Optional
+				colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO; // Optional
+				colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD; // Optional
+			}
+			else {
+				// alpha blending: finalcolor.rgb = newAlpha*newColor + (1-newAlpha)*oldColor; finalcolor.a = newAlpha.a
+				colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+				colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; // blend mthod
+				colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+				colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+				colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+				colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+			}
+		}
+
+		// color blend cretInfo
+		VkPipelineColorBlendStateCreateInfo colorBlendingCreateInfo = {};
+		{
+			colorBlendingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+			colorBlendingCreateInfo.logicOpEnable = VK_FALSE;  // 采用第二种方式需要 为 true, 二进制操作在 logicOp 字段中指定
+			colorBlendingCreateInfo.attachmentCount = 1;
+			colorBlendingCreateInfo.pAttachments = &colorBlendAttachment;
+			colorBlendingCreateInfo.blendConstants[0] = 0.0f; // Optional
+			colorBlendingCreateInfo.blendConstants[1] = 0.0f; // Optional
+			colorBlendingCreateInfo.blendConstants[2] = 0.0f; // Optional
+			colorBlendingCreateInfo.blendConstants[3] = 0.0f; // Optional
+		}
+
+		// 运行时动态修改
+		VkDynamicState dynamicState[] = {
+			VK_DYNAMIC_STATE_VIEWPORT,
+			VK_DYNAMIC_STATE_LINE_WIDTH
+		};
+		VkPipelineDynamicStateCreateInfo dynamicStateCreateInfo = {};
+		{
+			dynamicStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+			dynamicStateCreateInfo.dynamicStateCount = 2; // same to above
+			dynamicStateCreateInfo.pDynamicStates = dynamicState;
+		}
+		/********************************* Fixed-function State ********************************************/
+
+
+		/************************************* Pipeline Layout ********************************************/
+
+		/* 管线布局定义了 uniform(也许有DynamicState) 和 push values 的布局， 被 shader 每一次 drawing 的时候调用*/
+
+		// pipeLayout Createinfo
+		VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
+		{
+			pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipelineLayoutCreateInfo.setLayoutCount = 0; // Optional
+			pipelineLayoutCreateInfo.pSetLayouts = nullptr;	//Optional
+			pipelineLayoutCreateInfo.pushConstantRangeCount = 0;	//Optional
+			pipelineLayoutCreateInfo.pPushConstantRanges = 0;	//Optional
+		}
+		if (vkCreatePipelineLayout(m_logicalDevice, &pipelineLayoutCreateInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS) {
+			throw std::runtime_error("filed to create pipeline layout!");
+		}
+		/************************************* Pipeline Layout ********************************************/
+
+
+		/************************************* Render Pass ********************************************/
+		/*   定义于createRenderPass()函数中          */
+		/************************************* Render Pass ********************************************/
+
+
+		// Pipeline cretInfo
+		VkGraphicsPipelineCreateInfo pipelineCreateInfo = {};
+		{
+			pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+
+			// p_state 均为该 state 的 create info
+			pipelineCreateInfo.stageCount = 2;  // vertex AND fragment State
+			pipelineCreateInfo.pStages = shaderStages;
+
+			pipelineCreateInfo.pVertexInputState = &vertexInputInfo;
+			pipelineCreateInfo.pInputAssemblyState = &inputAssembly;
+			pipelineCreateInfo.pViewportState = &viewportState;
+			pipelineCreateInfo.pRasterizationState = &rasterizer;
+			pipelineCreateInfo.pMultisampleState = &multisampliing;
+			pipelineCreateInfo.pDepthStencilState = nullptr;  // Depth  Optional
+			pipelineCreateInfo.pColorBlendState = &colorBlendingCreateInfo;
+			pipelineCreateInfo.pDynamicState = nullptr; // Dynamicstage Optional
+
+			pipelineCreateInfo.layout = m_pipelineLayout;
+
+			pipelineCreateInfo.renderPass = m_renderPass; //  引用 renderPass
+			pipelineCreateInfo.subpass = 0; // subpass 子通道 的索引
+
+			/*
+			实际上还有两个参数:basePipelineHandle 和 basePipelineIndex。Vulkan允许您通过已经存在的管线创建新的图形管线。
+			这种衍生出新管线的想法在于，当要创建的管线与现有管道功能相同时，获得较低的开销，同时也可以更快的完成管线切换，当它们来自同一个父管线。
+			可以通过basePipelineHandle指定现有管线的句柄，也可以引用由basePipelineIndex所以创建的另一个管线。
+			目前只有一个管线，所以我们只需要指定一个空句柄和一个无效的索引。
+			只有在VkGraphicsPipelineCreateInfo的flags字段中也指定了VK_PIPELINE_CREATE_DERIVATIVE_BIT标志时，才需要使用这些值。
+			*/
+			pipelineCreateInfo.basePipelineHandle = VK_NULL_HANDLE;	//  Optional
+			pipelineCreateInfo.basePipelineIndex = -1;	//  Optional
+
+		}
+
+		// 1. 最终 创建 Pipeline 保存到成员变量, 可以传递多个 pipelineCreateInfo 来创建多个 管线
+		// 2. 第二个参数cache 用于存储和复用与通过多次调用VkCreateGraphicsPipelines 函数相关的数据， 甚至在程序执行时缓存到一个文件中， 这样可以加速后续的管线创建逻辑, 这里暂时不设置
+		if (vkCreateGraphicsPipelines(m_logicalDevice, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &m_graphicsPipeLine) != VK_SUCCESS)
+		{
+			throw std::runtime_error("failed to create graphics pipeline!");
+		}
+
+
+		// Destroy shaders modules to release resources after complete createPipeline
+		vkDestroyShaderModule(m_logicalDevice, fragShaderModule, nullptr);
+		vkDestroyShaderModule(m_logicalDevice, vertShaderModule, nullptr);
+	}
+
+	void createFrameBuffers()
+	{
+		m_swapChainFrameBuffers.resize(m_swapChainImageViews.size());
+
+		for (size_t i = 0; i < m_swapChainImageViews.size(); ++i)
+		{
+			VkImageView attachments[] = {
+				m_swapChainImageViews[i]
+			};
+
+			VkFramebufferCreateInfo framebufferInfo = {};
+			{
+				framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+				framebufferInfo.renderPass = m_renderPass;
+
+				framebufferInfo.attachmentCount = 1;
+				framebufferInfo.pAttachments = attachments;	//绑定到相应的附件描述的 VkImageView 对象
+
+				framebufferInfo.width = m_swapChainExtent.width;
+				framebufferInfo.height = m_swapChainExtent.height;
+				framebufferInfo.layers = 1;	// 指定图像组中的层数
+			}
+
+			if (vkCreateFramebuffer(m_logicalDevice, &framebufferInfo, nullptr, &m_swapChainFrameBuffers[i]) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create freamebuffer!");
+			}
+
+		}
+	}
+
+	void createCommandPool()
+	{
+		/*
+		命令缓存区将命令提交到一个设备队列（我们检索出来的 graphics 和 presentaion 队列） 上来执行
+		但每个 commandPool 只能分配在单一的队列上（分配的命令要与队列类型一致）
+		这里我们 绘制 选择 图形队列簇
+		*/
+		QueueFamilyIndices queueFamilyIndices = findQueueFamilies(m_physicalDevice);
+
+		VkCommandPoolCreateInfo poolInfo = {};
+		{
+			poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+			poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily;
+			poolInfo.flags = 0;  // Optional
+			/*
+			有两个标志位用于command pools :
+				VK_COMMAND_POOL_CREATE_TRANSIENT_BIT: 提示命令缓冲区非常频繁的重新记录新命令(可能会改变内存分配行为)
+				VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT : 允许命令缓冲区单独重新记录，没有这个标志，所有的命令缓冲区都必须一起重置
+			我们仅仅在程序开始的时候记录命令缓冲区，并在主循环体main loop中多次执行，因此我们不会使用这些标志。
+			*/
+		}
+
+		if (vkCreateCommandPool(m_logicalDevice, &poolInfo, nullptr, &m_commandPool) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create commandPool!");
+		}
+
+	}
+
+	void createCommandBuffers()
+	{
+		m_commandBuffers.resize(m_swapChainFrameBuffers.size());
+
+		// 1. 分配命令缓存区
+		VkCommandBufferAllocateInfo commandBufferAllocateInfo = {};
+		{
+			commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+			commandBufferAllocateInfo.commandPool = m_commandPool;
+			commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			/*
+			level参数指定分配的命令缓冲区的主从关系。
+				VK_COMMAND_BUFFER_LEVEL_PRIMARY : 可以提交到队列执行，但不能从其他的命令缓冲区调用。
+				VK_COMMAND_BUFFER_LEVEL_SECONDARY : 无法直接提交，但是可以从主命令缓冲区调用。
+			我们不会在这里使用辅助缓冲区功能，但是可以想像，对于复用主缓冲区的常用操作很有帮助。
+			*/
+			commandBufferAllocateInfo.commandBufferCount = (uint32_t)m_commandBuffers.size();
+		}
+
+		if (vkAllocateCommandBuffers(m_logicalDevice, &commandBufferAllocateInfo, m_commandBuffers.data()) != VK_SUCCESS) {
+			throw std::runtime_error("failed to allocate command buffers!");
+		}
+
+		for (size_t i = 0; i < m_commandBuffers.size(); i++)
+		{
+			// 2. 启动命令缓存记录
+			VkCommandBufferBeginInfo beginInfo = {};
+			{
+				beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+				beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+				beginInfo.pInheritanceInfo = nullptr; // Optional
+				/*
+				flags标志位参数用于指定如何使用命令缓冲区。可选的参数类型如下:
+					VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT: 命令缓冲区将在执行一次后立即重新记录。
+					VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT : 这是一个辅助缓冲区，它限制在在一个渲染通道中。
+					VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT : 命令缓冲区也可以重新提交，同时它也在等待执行。
+				我们使用了最后一个标志，因为我们可能已经在下一帧的时候安排了绘制命令，而最后一帧尚未完成。pInheritanceInfo参数与辅助缓冲区相关。它指定从主命令缓冲区继承的状态。
+				如果命令缓冲区已经被记录一次，那么调用vkBeginCommandBuffer会隐式地重置它。否则将命令附加到缓冲区是不可能的。
+				*/
+			}
+			vkBeginCommandBuffer(m_commandBuffers[i], &beginInfo);
+
+			// 3. 启动渲染通道
+			VkRenderPassBeginInfo renderPassInfo = {};
+			VkClearValue clearColor;
+			{
+				renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+				renderPassInfo.renderPass = m_renderPass;
+				renderPassInfo.framebuffer = m_swapChainFrameBuffers[i];
+
+				renderPassInfo.renderArea.offset = { 0,0 };
+				renderPassInfo.renderArea.extent = m_swapChainExtent;
+
+				clearColor = { 0.0f,0.0f,0.0f,1.0f };
+				renderPassInfo.clearValueCount = 1;
+				renderPassInfo.pClearValues = &clearColor;
+			}
+			vkCmdBeginRenderPass(m_commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+			/*
+			对于每个命令，第一个参数总是记录该命令的命令缓冲区。第二个参数指定我们传递的渲染通道的具体信息。最后的参数控制如何提供render pass将要应用的绘制命令。它使用以下数值任意一个 :
+				VK_SUBPASS_CONTENTS_INLINE: 渲染过程命令被嵌入在主命令缓冲区中，没有辅助缓冲区执行。
+				VK_SUBPASS_CONTENTS_SECONDARY_COOMAND_BUFFERS : 渲染通道命令将会从辅助命令缓冲区执行。
+			我们不会使用辅助命令缓冲区，所以我们选择第一个。
+			*/
+
+			// 4. 基本绘图命令
+			vkCmdBindPipeline(m_commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeLine);
+
+			vkCmdDraw(m_commandBuffers[i], 3, 1, 0, 0);
+			/*
+			实际的vkCmdDraw函数有点与字面意思不一致，它是如此简单，仅因为我们提前指定所有渲染相关的信息。它有如下的参数需要指定，除了命令缓冲区:
+				vertexCount: 即使我们没有顶点缓冲区，但是我们仍然有3个定点需要绘制。
+				instanceCount : 用于instanced 渲染，如果没有使用请填1。
+				firstVertex : 作为顶点缓冲区的偏移量，定义gl_VertexIndex的最小值。
+				firstInstance : 作为instanced 渲染的偏移量，定义了gl_InstanceIndex的最小值。
+			*/
+
+			// 5. 结束渲染
+			vkCmdEndRenderPass(m_commandBuffers[i]);
+
+			// 并停止命令缓存区的工作
+			if (vkEndCommandBuffer(m_commandBuffers[i]) != VK_SUCCESS)
+			{
+				throw	std::runtime_error("failed to record command buffer!");
+			}
+
+
+		}
+	}
+
+	void createSemphores()
+	{
+		VkSemaphoreCreateInfo semaphoreInfo = {};
+		semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+		if (vkCreateSemaphore(m_logicalDevice, &semaphoreInfo, nullptr, &m_imageAvailableSemaphore) != VK_SUCCESS ||
+			vkCreateSemaphore(m_logicalDevice, &semaphoreInfo, nullptr, &m_renderFinishedSemaphore) != VK_SUCCESS)
+		{
+			throw std::runtime_error("failed to create semaphores!");
+		}
+	}
+
+private:
+
+	void drawFrame()
+	{
+
+		vkQueueWaitIdle(m_presentQueue);
+
+		// 1. 创建信号量 : creteSemphores() in initVulkan()
+		// 2. 从交换链获取图像
+		uint32_t imageIndex;
+		vkAcquireNextImageKHR(m_logicalDevice, m_swapChain, std::numeric_limits<uint64_t>::max(), m_imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+		/*
+		vkAcquireNextImageKHR函数前两个参数是我们希望获取到图像的逻辑设备和交换链。
+		第三个参数指定获取有效图像的操作timeout，单位纳秒。我们使用64位无符号最大值禁止timeout。
+		接下来的两个参数指定使用的同步对象，当presentation引擎完成了图像的呈现后会使用该对象发起信号。
+		这就是开始绘制的时间点。它可以指定一个信号量semaphore或者栅栏或者两者。出于目的性，我们会使用imageAvailableSemaphore。
+		最后的参数指定交换链中成为available状态的图像对应的索引。其中索引会引用交换链图像数组swapChainImages的图像VkImage。我们使用这个索引选择正确的命令缓冲区。
+		*/
+
+		// 3. 提交命令缓冲区
+		VkSubmitInfo submitInfo = {};
+		VkSemaphore waitSemaphores[] = { m_imageAvailableSemaphore };
+		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+		VkSemaphore signalSemaphores[] = { m_renderFinishedSemaphore };
+		{
+			submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+			submitInfo.waitSemaphoreCount = 1;
+			submitInfo.pWaitSemaphores = waitSemaphores;
+			submitInfo.pWaitDstStageMask = waitStages;
+
+			submitInfo.commandBufferCount = 1; // Bug fixed: Lost 2 define
+			submitInfo.pCommandBuffers = &m_commandBuffers[imageIndex]; 
+
+			submitInfo.signalSemaphoreCount = 1;
+			submitInfo.pSignalSemaphores = signalSemaphores;
+
+		}
+
+		if (vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+		{
+			throw std::runtime_error("failed to submit draw command buffer!");
+		}
+
+		// 4. 将结果提交到 swapchain 交换链, 显示在屏幕上
+		VkPresentInfoKHR presentInfo = {};
+		VkSwapchainKHR swapChains[] = { m_swapChain };
+		{
+			presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+
+			presentInfo.waitSemaphoreCount = 1;
+			presentInfo.pWaitSemaphores = signalSemaphores; // 指定需要等待的信号量， 如 VkSubmitInfo 一样
+
+			presentInfo.swapchainCount = 1;
+			presentInfo.pSwapchains = swapChains; // 指定提交的 target swapchain 和 每个 swapchain 的索引
+			presentInfo.pImageIndices = &imageIndex;
+
+			presentInfo.pResults = nullptr; // 指定校验结果值，我们可以直接使用 vkQueuePresentKHR() 的返回值判断  Optional
+		}
+
+		auto result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+		if (result != VK_SUCCESS) {
+			throw std::runtime_error("failed to present imageIndex to swapchain!");
+		}
+
 	}
 
 private:
@@ -757,6 +1374,44 @@ private:
 		}
 	}
 
+	static std::vector<char> readFile(const std::string& filename)
+	{
+		std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+		if (!file.is_open()) {
+			throw std::runtime_error("failed to open file!");
+		}
+
+		size_t fileSize = (size_t)file.tellg();
+		std::vector<char> buffer(fileSize);
+
+		file.seekg(0);
+		file.read(buffer.data(), fileSize);
+
+		file.close();
+
+		return buffer;
+	}
+
+	VkShaderModule createShaderModule(const std::vector<char>& code)
+	{
+		VkShaderModuleCreateInfo shaderModuleCreateInfo = {};
+		{
+			shaderModuleCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+			shaderModuleCreateInfo.codeSize = code.size();
+
+			shaderModuleCreateInfo.pCode = reinterpret_cast<const uint32_t*> (code.data());
+		}
+
+		VkShaderModule shaderModule;
+		if (vkCreateShaderModule(m_logicalDevice, &shaderModuleCreateInfo, nullptr, &shaderModule) != VK_SUCCESS)
+		{
+			throw std::runtime_error("failed to create shader module");
+		}
+
+		return shaderModule;
+	}
+
 private:
 
 	static VKAPI_ATTR VkBool32 VKAPI_CALL
@@ -799,7 +1454,6 @@ int main()
 	//glm::mat4 matrix;
 	//glm::vec4 vec;
 	//auto test = matrix * vec;
-
 
 
 	return EXIT_SUCCESS;
