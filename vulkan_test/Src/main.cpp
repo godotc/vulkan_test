@@ -20,6 +20,14 @@
 #include<optional>
 #include<fstream>
 
+#include "Vertex.h"
+
+
+void throwRE(std::string info)
+{
+	throw std::runtime_error(info);
+}
+
 
 const int WIDTH = 800;
 const int HEIGTH = 600;
@@ -104,9 +112,21 @@ struct SwapChainSupportDetails
 };
 
 
+const std::vector<Vertex> vertices = {
+	{{ 0.0f, -0.5f}, {1.0f, 1.0f, 1.0f}},
+	{{ 0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}},
+	{{-0.5f, 0.5f},  {0.0f, 0.0f, 1.0f}}
+};
+
+
+/***************************************************************************************************/
+
+
+
 class HelloTriangle
 {
 public:
+
 	void run()
 	{
 		initWindow();
@@ -120,7 +140,7 @@ private:
 	GLFWwindow* p_window;  //glfw 窗体
 	VkInstance m_instance;	// Vulkan 实例
 
-	VkDebugUtilsMessengerEXT m_debugMessengerCallback;  // 验证层 dubg messenger
+	VkDebugUtilsMessengerEXT m_debugMessengerCallback;  // 验证层 dubg messen,ger
 	VkDebugReportCallbackEXT m_debugReportCallback;  // depercate
 
 	VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE; // 物理显卡设备
@@ -143,6 +163,9 @@ private:
 	VkRenderPass m_renderPass;	// 包含渲染等所有drawing命令在内完成, attachhment,subpass
 	VkPipelineLayout m_pipelineLayout;	// 管线布局 linera 、 Optimal(tile平铺)·
 
+	VkBuffer m_vertexBuffer;
+	VkDeviceMemory m_vertexBufferMemory;
+
 	VkCommandPool m_commandPool;	// 命令池：储存缓存区的内存 不能直接调用函数进行绘制或内存操作等， 而是写入命令缓存区来调用
 	std::vector<VkCommandBuffer> m_commandBuffers; // 命令缓冲区
 
@@ -155,8 +178,12 @@ private:
 	{
 		glfwInit();
 		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-		glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+		glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 		p_window = glfwCreateWindow(WIDTH, HEIGTH, "Vulkan window", nullptr, nullptr);
+
+		glfwSetWindowUserPointer(p_window, this);
+		glfwSetWindowSizeCallback(p_window, HelloTriangle::onWindowRedsized);
+
 	}
 
 	void initVulkan()
@@ -171,8 +198,9 @@ private:
 		createImageViews();
 		createRenderPass();
 		createGraphicsPipeline();
-		createFrameBuffers();
+		createFramebuffers();
 		createCommandPool();
+		createVertexBuffer();
 		createCommandBuffers();
 		createSemphores();
 	}
@@ -189,36 +217,44 @@ private:
 		}
 	}
 
-	void cleanup()
-	{	/* 与create 的顺序相反 */
 
-		vkDestroySemaphore(m_logicalDevice, m_renderFinishedSemaphore, nullptr);
-		vkDestroySemaphore(m_logicalDevice, m_imageAvailableSemaphore, nullptr);
-		vkDestroyCommandPool(m_logicalDevice, m_commandPool, nullptr);
-
+	void cleanupSwapChain()
+	{
 		for (size_t i = 0; i < m_swapChainFrameBuffers.size(); ++i)
 		{
 			vkDestroyFramebuffer(m_logicalDevice, m_swapChainFrameBuffers[i], nullptr);
 		}
-
 		vkDestroyPipeline(m_logicalDevice, m_graphicsPipeLine, nullptr);
 		vkDestroyPipelineLayout(m_logicalDevice, m_pipelineLayout, nullptr);
 		vkDestroyRenderPass(m_logicalDevice, m_renderPass, nullptr);
-
 		for (size_t i = 0; i < m_swapChainImageViews.size(); ++i)
 		{
 			vkDestroyImageView(m_logicalDevice, m_swapChainImageViews[i], nullptr);
 		}
-
 		vkDestroySwapchainKHR(m_logicalDevice, m_swapChain, nullptr);
+	}
 
+	void cleanup()
+	{
+		cleanupSwapChain();
+
+		vkFreeMemory(m_logicalDevice, m_vertexBufferMemory, nullptr);
+		vkDestroyBuffer(m_logicalDevice, m_vertexBuffer, nullptr);
+
+		vkDestroySemaphore(m_logicalDevice, m_renderFinishedSemaphore, nullptr);
+		vkDestroySemaphore(m_logicalDevice, m_imageAvailableSemaphore, nullptr);
+
+		vkDestroyCommandPool(m_logicalDevice, m_commandPool, nullptr);
+
+		vkDestroyDevice(m_logicalDevice, nullptr);
+
+		//  Swap Chain 相关
 		if (enableValidationLayers)
 		{
 			DestoryDebugUtilsMessengerEXT(m_instance, m_debugMessengerCallback, nullptr);
 		}
 		// DestoryDebugReportCallbackEXT(m_instance, m_debugReportCallback, nullptr);
 
-		vkDestroyDevice(m_logicalDevice, nullptr);
 		vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
 		vkDestroyInstance(m_instance, nullptr);
 		glfwDestroyWindow(p_window);
@@ -618,12 +654,14 @@ private:
 
 		// vertx input State cretInfo
 		VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
+		auto bindingDescription = Vertex::getBindingDescription();
+		auto attributeDescriptions = Vertex::getAttributeDescriptions();
 		{
 			vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-			vertexInputInfo.vertexBindingDescriptionCount = 0;
-			vertexInputInfo.pVertexBindingDescriptions = nullptr; // Optional
-			vertexInputInfo.vertexAttributeDescriptionCount = 0;
-			vertexInputInfo.pVertexAttributeDescriptions = nullptr; //Optional
+			vertexInputInfo.vertexBindingDescriptionCount = 1;
+			vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+			vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+			vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
 		}
 		/************************** Shader Stages ***********************************************/
 
@@ -841,7 +879,7 @@ private:
 		vkDestroyShaderModule(m_logicalDevice, vertShaderModule, nullptr);
 	}
 
-	void createFrameBuffers()
+	void createFramebuffers()
 	{
 		m_swapChainFrameBuffers.resize(m_swapChainImageViews.size());
 
@@ -898,6 +936,51 @@ private:
 			throw std::runtime_error("failed to create commandPool!");
 		}
 
+	}
+
+	void createVertexBuffer()
+	{
+		/*
+		------>填充顶点缓冲区(传入顶点数据） （memmap m_vertBufMemory 到 cpu 访存 -> copy 顶点数据到该内存 -> 取消 map）
+		method 1: 驱动程序不会立即拷贝数据到缓冲区中， 需要映射一块内存到缓冲区，然后拷贝到这块内存里, 但内存映射有一点性能损失
+		method 2: 完成内存映射后，调用 vkFlushMappedMemoryRanges, 读取隐射内存时，调用 vkInvalidateMappedMemoryRanges
+		这里选用 方法 1
+		*/
+
+		VkDeviceSize buffersize = sizeof(vertices[0]) * vertices.size();  // 要拷贝的顶点数据大小
+
+		/*************************临时缓冲区： 使用临时的buffer,buffermemory和临时的commandBuffer来提升性能********/
+
+		// 这里使用临时的缓冲区
+		VkBuffer stagingBuffer; // 用 stagingbuffer 来划分SBmemory
+		VkDeviceMemory stagingBufferMemory;
+		// 创建 buffer 顶点缓冲、host visible、 host coherent
+		/*
+		我们使用stagingBuffer来划分stagingBufferMemory缓冲区用来映射、拷贝顶点数据。在本章节我们使用两个新的缓冲区usage标致类型：
+			VK_BUFFER_USAGE_TRANSFER_SRC_BIT：缓冲区可以用于源内存传输操作。
+			VK_BUFFER_USAGE_TRANSFER_DST_BIT：缓冲区可以用于目标内存传输操作。
+		*/
+		createBuffer(buffersize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+
+
+		// map 临时 buufer, 把顶点数据拷贝过去
+		void* data;
+		vkMapMemory(m_logicalDevice, stagingBufferMemory, 0, buffersize, 0, &data); // map 到临时内存
+		memcpy(data, vertices.data(), (size_t)buffersize);
+		vkUnmapMemory(m_logicalDevice, stagingBufferMemory); // 停止映射
+
+		// 创建 设备上 在 cpu访存上的 map
+		createBuffer(buffersize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, m_vertexBuffer, m_vertexBufferMemory);
+
+
+		//  从已经拷贝完的map区域 stagingBuffer, 拷贝到同样map的 device 的 m_vertexBuffer 区域
+		copyBuffer(stagingBuffer, m_vertexBuffer, buffersize);  // encapsulation 封装 copy 操作
+
+
+		// 清理掉使用完的 stagingBuffer 和 stagingBufferMemory
+		vkDestroyBuffer(m_logicalDevice, stagingBuffer, nullptr);
+		vkFreeMemory(m_logicalDevice, stagingBufferMemory, nullptr);
 	}
 
 	void createCommandBuffers()
@@ -968,7 +1051,11 @@ private:
 			// 4. 基本绘图命令
 			vkCmdBindPipeline(m_commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeLine);
 
-			vkCmdDraw(m_commandBuffers[i], 3, 1, 0, 0);
+			VkBuffer vertexBuffers[] = { m_vertexBuffer };
+			VkDeviceSize offsets[] = { 0 };
+			vkCmdBindVertexBuffers(m_commandBuffers[i], 0, 1, vertexBuffers, offsets);
+
+			vkCmdDraw(m_commandBuffers[i], static_cast<uint32_t>(vertices.size()), 1, 0, 0);
 			/*
 			实际的vkCmdDraw函数有点与字面意思不一致，它是如此简单，仅因为我们提前指定所有渲染相关的信息。它有如下的参数需要指定，除了命令缓冲区:
 				vertexCount: 即使我们没有顶点缓冲区，但是我们仍然有3个定点需要绘制。
@@ -1004,15 +1091,28 @@ private:
 
 private:
 
+	void recreateSwapChain() {
+		vkDeviceWaitIdle(m_logicalDevice); // 不触碰正在使用中的资源
+
+		createSwapChain();
+		createImageViews();
+		createRenderPass();
+		createGraphicsPipeline();
+		createFramebuffers();
+		createCommandBuffers();
+	}
+
+
+private:
+
 	void drawFrame()
 	{
 
-		vkQueueWaitIdle(m_presentQueue);
 
 		// 1. 创建信号量 : creteSemphores() in initVulkan()
 		// 2. 从交换链获取图像
 		uint32_t imageIndex;
-		vkAcquireNextImageKHR(m_logicalDevice, m_swapChain, std::numeric_limits<uint64_t>::max(), m_imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+		VkResult  result = vkAcquireNextImageKHR(m_logicalDevice, m_swapChain, std::numeric_limits<uint64_t>::max(), m_imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
 		/*
 		vkAcquireNextImageKHR函数前两个参数是我们希望获取到图像的逻辑设备和交换链。
 		第三个参数指定获取有效图像的操作timeout，单位纳秒。我们使用64位无符号最大值禁止timeout。
@@ -1020,6 +1120,13 @@ private:
 		这就是开始绘制的时间点。它可以指定一个信号量semaphore或者栅栏或者两者。出于目的性，我们会使用imageAvailableSemaphore。
 		最后的参数指定交换链中成为available状态的图像对应的索引。其中索引会引用交换链图像数组swapChainImages的图像VkImage。我们使用这个索引选择正确的命令缓冲区。
 		*/
+		if (result == VK_ERROR_OUT_OF_DATE_KHR) {// swap chain 与 surface 不再兼容，不可进行渲染
+			recreateSwapChain();
+			return;
+		}
+		else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) { // SUPOPTIMAL 交换链仍可以向surface提交图像，但是surface的熟悉不再匹配准确，比如平台可能重新调整图像的尺寸适应大小
+			throw std::runtime_error("failed to acquire swap chain image");
+		}
 
 		// 3. 提交命令缓冲区
 		VkSubmitInfo submitInfo = {};
@@ -1034,7 +1141,7 @@ private:
 			submitInfo.pWaitDstStageMask = waitStages;
 
 			submitInfo.commandBufferCount = 1; // Bug fixed: Lost 2 define
-			submitInfo.pCommandBuffers = &m_commandBuffers[imageIndex]; 
+			submitInfo.pCommandBuffers = &m_commandBuffers[imageIndex];
 
 			submitInfo.signalSemaphoreCount = 1;
 			submitInfo.pSignalSemaphores = signalSemaphores;
@@ -1062,12 +1169,18 @@ private:
 			presentInfo.pResults = nullptr; // 指定校验结果值，我们可以直接使用 vkQueuePresentKHR() 的返回值判断  Optional
 		}
 
-		auto result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
-		if (result != VK_SUCCESS) {
-			throw std::runtime_error("failed to present imageIndex to swapchain!");
+		result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+			recreateSwapChain();
+		}
+		else if (result != VK_SUCCESS) {
+			throw std::runtime_error("failed to present image/imageIndex to swapchain!");
 		}
 
+		vkQueueWaitIdle(m_presentQueue);
 	}
+
+
 
 private:
 
@@ -1361,7 +1474,9 @@ private:
 			return capabilities.currentExtent;
 		}
 		else {
-			VkExtent2D actualExtent = { WIDTH,HEIGTH };
+			int width, height;
+			glfwGetWindowSize(p_window, &width, &height);
+			VkExtent2D actualExtent = { width,height };
 
 			actualExtent.width = std::max(
 				capabilities.minImageExtent.width,
@@ -1412,6 +1527,107 @@ private:
 		return shaderModule;
 	}
 
+	uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
+	{
+		VkPhysicalDeviceMemoryProperties memProperties;
+		vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProperties);
+
+		// 为缓冲区找到合适的内存类型
+		for (uint32_t i = 0; i < memProperties.memoryTypeCount; ++i) {
+			if (typeFilter & (1 << i) &&  // vertexbuffer
+				(memProperties.memoryTypes[i].propertyFlags & properties) == properties) // 顶点
+			{
+				return i;
+			}
+		}
+
+		throwRE("failed to find suitable memory type!");
+	}
+
+	void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory)
+	{
+
+		// 1. 创建缓冲区,
+		VkBufferCreateInfo bufferInfo = {};
+		{
+			bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+			bufferInfo.size = size;
+			bufferInfo.usage = usage;	//使用bit来指定多个使用目的
+			bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE; // 独占模式，不进行缓冲区共享（给其他队列蔟）
+		}
+
+		if (vkCreateBuffer(m_logicalDevice, &bufferInfo, nullptr, &buffer) != VK_SUCCESS)
+		{
+			throwRE("failed to create vertexbuffer");
+		}
+
+		// 2. 内存需求
+		VkMemoryRequirements memoryRequirements;
+		vkGetBufferMemoryRequirements(m_logicalDevice, buffer, &memoryRequirements);
+
+		// 3. 内存分配
+		VkMemoryAllocateInfo allocInfo = {};
+		{
+			allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+			allocInfo.allocationSize = memoryRequirements.size;
+			allocInfo.memoryTypeIndex = findMemoryType(memoryRequirements.memoryTypeBits, properties);
+		}
+		if (vkAllocateMemory(m_logicalDevice, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS)
+		{
+			throwRE("failed to allocate vertex buffer memory!");
+		}
+
+		// 4. 关联到缓冲区	
+		vkBindBufferMemory(m_logicalDevice, buffer, bufferMemory, 0);
+	}
+
+	void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size)
+	{
+		// 分配一个临时的命令缓冲区,来提交操作命令
+		VkCommandBufferAllocateInfo allocInfo = {};
+		{
+			allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+			allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			allocInfo.commandPool = m_commandPool;
+			allocInfo.commandBufferCount = 1;
+		}
+
+		VkCommandBuffer commandBuffer;
+		vkAllocateCommandBuffers(m_logicalDevice, &allocInfo, &commandBuffer);
+
+		// 类似绘制命令的启动与提交属性
+		VkCommandBufferBeginInfo beginInfo = {};
+		{
+			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT; // 好习惯
+		}
+
+		// 写入命令
+		vkBeginCommandBuffer(commandBuffer, &beginInfo);
+		{
+			VkBufferCopy copyRegion = {};
+			copyRegion.srcOffset = 0; // Optional
+			copyRegion.dstOffset = 0; // Optional
+			copyRegion.size = size;
+			vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+		}
+		vkEndCommandBuffer(commandBuffer); // 停止记录
+
+		// 提交命令
+		VkSubmitInfo submitInfo = {};
+		{
+			submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+			submitInfo.commandBufferCount = 1;
+			submitInfo.pCommandBuffers = &commandBuffer;
+		}
+		vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+		vkQueueWaitIdle(m_graphicsQueue); // 等待传输命令完成 或使用 fence来安排多个连续的传输操作
+
+
+		// 删除临时命令缓冲区
+		vkFreeCommandBuffers(m_logicalDevice, m_commandPool, 1, &commandBuffer);
+	}
+
 private:
 
 	static VKAPI_ATTR VkBool32 VKAPI_CALL
@@ -1439,6 +1655,13 @@ private:
 		return VK_FALSE;
 	}
 
+	static void onWindowRedsized(GLFWwindow* window, int width, int height)
+	{
+		if (width == 0 || height == 0) return;
+
+		HelloTriangle* app = reinterpret_cast<HelloTriangle*>(glfwGetWindowUserPointer(window));
+		app->recreateSwapChain();
+	}
 };
 
 int main()
