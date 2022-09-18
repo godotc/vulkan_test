@@ -112,10 +112,16 @@ struct SwapChainSupportDetails
 };
 
 
-const std::vector<Vertex> vertices = {
-	{{ 0.0f, -0.5f}, {1.0f, 1.0f, 1.0f}},
-	{{ 0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}},
-	{{-0.5f, 0.5f},  {0.0f, 0.0f, 1.0f}}
+const std::vector<Vertex> gb_vertices = {
+	{{ -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+	{{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+	{{  0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+	{{ -0.5f, 0.5f},  {1.0f, 1.0f, 1.0f}}
+};
+
+const std::vector<uint16_t> gb_indices = {
+	0,1,2,
+	2,3,0
 };
 
 
@@ -165,6 +171,8 @@ private:
 
 	VkBuffer m_vertexBuffer;
 	VkDeviceMemory m_vertexBufferMemory;
+	VkBuffer m_indexBuffer;
+	VkDeviceMemory m_indexBufferMemory;
 
 	VkCommandPool m_commandPool;	// 命令池：储存缓存区的内存 不能直接调用函数进行绘制或内存操作等， 而是写入命令缓存区来调用
 	std::vector<VkCommandBuffer> m_commandBuffers; // 命令缓冲区
@@ -200,7 +208,10 @@ private:
 		createGraphicsPipeline();
 		createFramebuffers();
 		createCommandPool();
+
 		createVertexBuffer();
+		createIndexBuffer();
+
 		createCommandBuffers();
 		createSemphores();
 	}
@@ -216,7 +227,6 @@ private:
 			vkDeviceWaitIdle(m_logicalDevice);
 		}
 	}
-
 
 	void cleanupSwapChain()
 	{
@@ -238,8 +248,11 @@ private:
 	{
 		cleanupSwapChain();
 
-		vkFreeMemory(m_logicalDevice, m_vertexBufferMemory, nullptr);
+		vkDestroyBuffer(m_logicalDevice, m_indexBuffer, nullptr);
+		vkFreeMemory(m_logicalDevice, m_indexBufferMemory, nullptr);
+
 		vkDestroyBuffer(m_logicalDevice, m_vertexBuffer, nullptr);
+		vkFreeMemory(m_logicalDevice, m_vertexBufferMemory, nullptr);
 
 		vkDestroySemaphore(m_logicalDevice, m_renderFinishedSemaphore, nullptr);
 		vkDestroySemaphore(m_logicalDevice, m_imageAvailableSemaphore, nullptr);
@@ -947,7 +960,7 @@ private:
 		这里选用 方法 1
 		*/
 
-		VkDeviceSize buffersize = sizeof(vertices[0]) * vertices.size();  // 要拷贝的顶点数据大小
+		VkDeviceSize buffersize = sizeof(gb_vertices[0]) * gb_vertices.size();  // 要拷贝的顶点数据大小
 
 		/*************************临时缓冲区： 使用临时的buffer,buffermemory和临时的commandBuffer来提升性能********/
 
@@ -967,7 +980,7 @@ private:
 		// map 临时 buufer, 把顶点数据拷贝过去
 		void* data;
 		vkMapMemory(m_logicalDevice, stagingBufferMemory, 0, buffersize, 0, &data); // map 到临时内存
-		memcpy(data, vertices.data(), (size_t)buffersize);
+		memcpy(data, gb_vertices.data(), (size_t)buffersize);
 		vkUnmapMemory(m_logicalDevice, stagingBufferMemory); // 停止映射
 
 		// 创建 设备上 在 cpu访存上的 map
@@ -983,11 +996,36 @@ private:
 		vkFreeMemory(m_logicalDevice, stagingBufferMemory, nullptr);
 	}
 
+	void createIndexBuffer()
+	{
+		// 类似于vertex buffer
+		VkDeviceSize bufferSize = sizeof(gb_indices[0]) * gb_indices.size();
+
+		VkBuffer stagingBuffer;
+		VkDeviceMemory stagingBufferMemory;
+		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+		void* data;
+		vkMapMemory(m_logicalDevice, stagingBufferMemory, 0, bufferSize, 0, &data);
+		memcpy(data, gb_indices.data(), (size_t)bufferSize);
+		vkUnmapMemory(m_logicalDevice, stagingBufferMemory);
+
+		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_indexBuffer, m_indexBufferMemory);
+
+		copyBuffer(stagingBuffer, m_indexBuffer, bufferSize);
+
+
+		// clean stage data
+		vkDestroyBuffer(m_logicalDevice, stagingBuffer, nullptr);
+		vkFreeMemory(m_logicalDevice, stagingBufferMemory, nullptr);
+
+	}
+
 	void createCommandBuffers()
 	{
 		m_commandBuffers.resize(m_swapChainFrameBuffers.size());
 
-		// 1. 分配命令缓存区
+		// 1. 分配命令缓存区内存
 		VkCommandBufferAllocateInfo commandBufferAllocateInfo = {};
 		{
 			commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -1001,8 +1039,8 @@ private:
 			*/
 			commandBufferAllocateInfo.commandBufferCount = (uint32_t)m_commandBuffers.size();
 		}
-
-		if (vkAllocateCommandBuffers(m_logicalDevice, &commandBufferAllocateInfo, m_commandBuffers.data()) != VK_SUCCESS) {
+		if (vkAllocateCommandBuffers(m_logicalDevice, &commandBufferAllocateInfo, m_commandBuffers.data()) != VK_SUCCESS)
+		{
 			throw std::runtime_error("failed to allocate command buffers!");
 		}
 
@@ -1023,7 +1061,9 @@ private:
 				如果命令缓冲区已经被记录一次，那么调用vkBeginCommandBuffer会隐式地重置它。否则将命令附加到缓冲区是不可能的。
 				*/
 			}
-			vkBeginCommandBuffer(m_commandBuffers[i], &beginInfo);
+
+			/*<-------------------------------------------------------------------------------->*/
+			vkBeginCommandBuffer(m_commandBuffers[i], &beginInfo); // S 启动命令记录
 
 			// 3. 启动渲染通道
 			VkRenderPassBeginInfo renderPassInfo = {};
@@ -1040,22 +1080,31 @@ private:
 				renderPassInfo.clearValueCount = 1;
 				renderPassInfo.pClearValues = &clearColor;
 			}
-			vkCmdBeginRenderPass(m_commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-			/*
-			对于每个命令，第一个参数总是记录该命令的命令缓冲区。第二个参数指定我们传递的渲染通道的具体信息。最后的参数控制如何提供render pass将要应用的绘制命令。它使用以下数值任意一个 :
-				VK_SUBPASS_CONTENTS_INLINE: 渲染过程命令被嵌入在主命令缓冲区中，没有辅助缓冲区执行。
-				VK_SUBPASS_CONTENTS_SECONDARY_COOMAND_BUFFERS : 渲染通道命令将会从辅助命令缓冲区执行。
-			我们不会使用辅助命令缓冲区，所以我们选择第一个。
-			*/
+
+			vkCmdBeginRenderPass(m_commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE); // S 开启渲染通道
+			/// <vkCmdBeginRenderPass>
+			///	对于每个命令，第一个参数总是记录该命令的命令缓冲区。第二个参数指定我们传递的渲染通道的具体信息。
+			///	最后的参数控制如何提供render pass将要应用的绘制命令。它使用以下数值任意一个 :
+			///		VK_SUBPASS_CONTENTS_INLINE: 渲染过程命令被嵌入在主命令缓冲区中，没有辅助缓冲区执行。
+			///		VK_SUBPASS_CONTENTS_SECONDARY_COOMAND_BUFFERS : 渲染通道命令将会从辅助命令缓冲区执行。
+			///	我们不会使用辅助命令缓冲区，所以我们选择第一个。
+			/// </vkCmdBeginRenderPass>
 
 			// 4. 基本绘图命令
-			vkCmdBindPipeline(m_commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeLine);
 
+			/// 绑定管线
+			vkCmdBindPipeline(m_commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeLine);
 			VkBuffer vertexBuffers[] = { m_vertexBuffer };
 			VkDeviceSize offsets[] = { 0 };
+
+			/// 绑定顶点缓冲区
 			vkCmdBindVertexBuffers(m_commandBuffers[i], 0, 1, vertexBuffers, offsets);
 
-			vkCmdDraw(m_commandBuffers[i], static_cast<uint32_t>(vertices.size()), 1, 0, 0);
+			/// 绑定索引缓冲区
+			vkCmdBindIndexBuffer(m_commandBuffers[i], m_indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
+			/// 使用 vkCmdDrawIndexed 替代，复用顶点
+			//vkCmdDraw(m_commandBuffers[i], static_cast<uint32_t>(vertices.size()), 1, 0, 0);
 			/*
 			实际的vkCmdDraw函数有点与字面意思不一致，它是如此简单，仅因为我们提前指定所有渲染相关的信息。它有如下的参数需要指定，除了命令缓冲区:
 				vertexCount: 即使我们没有顶点缓冲区，但是我们仍然有3个定点需要绘制。
@@ -1063,12 +1112,15 @@ private:
 				firstVertex : 作为顶点缓冲区的偏移量，定义gl_VertexIndex的最小值。
 				firstInstance : 作为instanced 渲染的偏移量，定义了gl_InstanceIndex的最小值。
 			*/
+			vkCmdDrawIndexed(m_commandBuffers[i], static_cast<uint32_t>(gb_indices.size()), 1, 0, 0, 0);
+
 
 			// 5. 结束渲染
-			vkCmdEndRenderPass(m_commandBuffers[i]);
+			vkCmdEndRenderPass(m_commandBuffers[i]);  // E 结束渲染
 
-			// 并停止命令缓存区的工作
-			if (vkEndCommandBuffer(m_commandBuffers[i]) != VK_SUCCESS)
+			auto result = (vkEndCommandBuffer(m_commandBuffers[i])); // E 结束命令记录
+			/*<-------------------------------------------------------------------------------->*/
+			if (result != VK_SUCCESS)
 			{
 				throw	std::runtime_error("failed to record command buffer!");
 			}
