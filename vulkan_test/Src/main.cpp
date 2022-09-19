@@ -8,6 +8,8 @@
 #include<glm/glm.hpp>
 #include<glm/gtc/matrix_transform.hpp>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include<stb/stb_iamge.h>
 
 
 #include<set>
@@ -184,6 +186,10 @@ private:
 	VkBuffer m_uniformBuffer;
 	VkDeviceMemory m_uniformBUfferMemory;
 
+	VkImage m_textureImage;
+	VkDeviceMemory  m_textureImageMemory;
+
+
 	VkCommandPool m_commandPool;	// 命令池：储存缓存区的内存 不能直接调用函数进行绘制或内存操作等， 而是写入命令缓存区来调用
 	std::vector<VkCommandBuffer> m_commandBuffers; // 命令缓冲区
 
@@ -220,6 +226,8 @@ private:
 		createFramebuffers();
 		createCommandPool();
 
+		createTextureImage();
+
 		createVertexBuffer();
 		createIndexBuffer();
 		createUniformBuffer();
@@ -254,6 +262,9 @@ private:
 		vkDeviceWaitIdle(m_logicalDevice);
 
 		cleanupSwapChain();
+
+		vkDestroyImage(m_logicalDevice, m_textureImage, nullptr);
+		vkFreeMemory(m_logicalDevice, m_textureImageMemory, nullptr);
 
 		vkDestroyDescriptorPool(m_logicalDevice, m_descriptorPool, nullptr);
 		vkDestroyDescriptorSetLayout(m_logicalDevice, m_descriptorSetLayout, nullptr);
@@ -990,6 +1001,51 @@ private:
 
 	}
 
+	void createTextureImage()
+	{
+		// TODO(enchance): 把这个功能归为一个类，而不是用死的成员变量只能传入一张图片
+
+		// 导入图片， map、拷贝像素到临时缓冲区， 清除像素
+		int texWidth, texHeight, texChannels;
+		stbi_uc* pixels = stbi_load("Textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+		if (!pixels)
+		{
+			throwRE("failed to load texture image!");
+		}
+
+		VkDeviceSize imageSize = texWidth * texHeight * 4;
+
+		VkBuffer stagingBuffer;
+		VkDeviceMemory stagingBufferMemory;
+
+		createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+		void* data;
+		vkMapMemory(m_logicalDevice, stagingBufferMemory, 0, imageSize, 0, &data);
+		memcpy(data, pixels, static_cast<size_t>(imageSize));
+		vkUnmapMemory(m_logicalDevice, stagingBufferMemory);
+
+		stbi_image_free(pixels);
+
+
+		// 创建 从主要m_textureImage上的 map 映射
+		createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_textureImage, m_textureImageMemory);
+
+		// 变化题图图像 layout 到 VK_IAMGE_LAYOUT_TRANSFER_DST_OPTIMAL
+		// TODO (may fix): old layout 本来为 PREINITIALIZED 函数中未定义 该参数的控制流
+		transitionImageLayout(m_textureImage, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+		// 执行 缓冲区 到 图像的 拷贝操作
+		copyBufferToImage(stagingBuffer, m_textureImage, static_cast<uint32_t> (texWidth), static_cast<uint32_t>(texHeight));
+
+		// 做最后的变换来准备 着色器访问, 在缓冲区拷贝到m_textureImage后？
+		transitionImageLayout(m_textureImage, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+		vkDestroyBuffer(m_logicalDevice, stagingBuffer, nullptr);
+		vkFreeMemory(m_logicalDevice, stagingBufferMemory, nullptr);
+
+	}
+
 	void createVertexBuffer()
 	{
 		/*
@@ -1364,7 +1420,7 @@ private:
 		}
 
 		result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
-		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) 
+		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
 		{
 			std::cout << "warn of present queue" << std::endl;
 			recreateSwapChain();
@@ -1755,7 +1811,7 @@ private:
 			throwRE("failed to create vertexbuffer");
 		}
 
-		// 2. 内存需求
+		// 2. 内存需求VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
 		VkMemoryRequirements memoryRequirements;
 		vkGetBufferMemoryRequirements(m_logicalDevice, buffer, &memoryRequirements);
 
@@ -1778,48 +1834,19 @@ private:
 	void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size)
 	{
 		// 分配一个临时的命令缓冲区,来提交操作命令
-		VkCommandBufferAllocateInfo allocInfo = {};
-		{
-			allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-			allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-			allocInfo.commandPool = m_commandPool;
-			allocInfo.commandBufferCount = 1;
-		}
+		VkCommandBuffer commandBuffer = beginSingleTimeCommands();
 
-		VkCommandBuffer commandBuffer;
-		vkAllocateCommandBuffers(m_logicalDevice, &allocInfo, &commandBuffer);
-
-		// 类似绘制命令的启动与提交属性
-		VkCommandBufferBeginInfo beginInfo = {};
+		// 进行 copy
+		VkBufferCopy copyRegion = {};
 		{
-			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT; // 好习惯
-		}
-
-		// 写入命令
-		vkBeginCommandBuffer(commandBuffer, &beginInfo);
-		{
-			VkBufferCopy copyRegion = {};
 			copyRegion.srcOffset = 0; // Optional
 			copyRegion.dstOffset = 0; // Optional
 			copyRegion.size = size;
-			vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
 		}
-		vkEndCommandBuffer(commandBuffer); // 停止记录
+		vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
 
-		// 提交命令
-		VkSubmitInfo submitInfo = {};
-		{
-			submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-			submitInfo.commandBufferCount = 1;
-			submitInfo.pCommandBuffers = &commandBuffer;
-		}
-		vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-		vkQueueWaitIdle(m_graphicsQueue); // 等待传输命令完成 或使用 fence来安排多个连续的传输操作
-
-
-		// 删除临时命令缓冲区
-		vkFreeCommandBuffers(m_logicalDevice, m_commandPool, 1, &commandBuffer);
+		// 提交与删除临时 命令 缓冲
+		endSingleTimeCommands(commandBuffer);
 	}
 
 	void updateUniformBuffer()
@@ -1855,6 +1882,191 @@ private:
 		vkUnmapMemory(m_logicalDevice, m_uniformBUfferMemory);
 	}
 
+	void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usageBits, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory)
+	{
+		// 创建 成员 VKImage-textureiamge 和 成员 textureMemory 对象
+		VkImageCreateInfo imageInfo = {};
+		{
+			imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+			imageInfo.imageType = VK_IMAGE_TYPE_2D;			// 1D:数组或灰度图 2D：纹理图像 3D：立体纹素
+			imageInfo.extent.width = static_cast<uint32_t>(width);
+			imageInfo.extent.height = static_cast<uint32_t>(height);
+			imageInfo.extent.depth = 1;
+			imageInfo.mipLevels = 1;	// 
+			imageInfo.arrayLayers = 1;
+
+			imageInfo.format = format;
+
+			imageInfo.tiling = tiling;	// linear/optimal 纹素的布局
+
+			imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; // undefine/preinitialized gpu均不能使用，第一个变化不会/会保存纹素
+
+			imageInfo.usage = usageBits;   // 缓冲区拷贝的目标/让shader可访问图像对mesh着色
+
+			imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+			imageInfo.flags = 0;	// Optional
+		}
+
+		if (vkCreateImage(m_logicalDevice, &imageInfo, nullptr, &image) != VK_SUCCESS)
+		{
+			throwRE("failed to create image!");
+			
+		}
+
+		// 分配 texImg 的内存
+		VkMemoryRequirements memRequirements; // 查询支持的内存类型
+		vkGetImageMemoryRequirements(m_logicalDevice, image, &memRequirements);
+
+		VkMemoryAllocateInfo allocInfo = {};
+		{
+			allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+			allocInfo.allocationSize = memRequirements.size;
+			allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+		}
+		if (vkAllocateMemory(m_logicalDevice, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS)
+		{
+			throw std::runtime_error("failed to allocate image memory!");
+		}
+
+		// 绑定 m_texImg 到 vuilkan
+		vkBindImageMemory(m_logicalDevice, image, imageMemory, 0);
+
+
+	}
+
+	VkCommandBuffer beginSingleTimeCommands()
+	{
+		// 分配命令空间
+		VkCommandBufferAllocateInfo allocInfo = {};
+		{
+			allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+			allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			allocInfo.commandPool = m_commandPool;
+			allocInfo.commandBufferCount = 1;
+		}
+		VkCommandBuffer commandBuffer;
+		vkAllocateCommandBuffers(m_logicalDevice, &allocInfo, &commandBuffer);
+
+		// 开始命令 及 开始记录需要的信息
+		VkCommandBufferBeginInfo beginInfo = {};
+		{
+			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT; // On time 好习惯
+		}
+		vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+		return commandBuffer;
+	}
+
+	void endSingleTimeCommands(VkCommandBuffer& commandBuffer)
+	{
+		// TODO(may fix): 是否需要引用 commandBuffer
+
+		// 结束 命令记录
+		vkEndCommandBuffer(commandBuffer);
+
+		// 提交命令 到 缓冲区 到 command pool
+		VkSubmitInfo submitInfo = {};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &commandBuffer;
+
+		vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE); // 提交到 graphic queue
+
+		vkQueueWaitIdle(m_graphicsQueue);
+
+		vkFreeCommandBuffers(m_logicalDevice, m_commandPool, 1, &commandBuffer); // 清除掉 commandbuffer
+	}
+
+	void transitionImageLayout(VkImage image, VkFormat  format, VkImageLayout oldLayout, VkImageLayout newLayout)
+	{
+		// 变换图像的布局
+		VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+		// image memory barrier 管线屏障用于访问资源的同时进行同步操作， 类似缓冲区一次性写入操作再读取
+		VkImageMemoryBarrier barrier = {};
+		{
+			barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+
+			barrier.oldLayout = oldLayout;  // 可以使用 VK_IAMGE_LAYOUT_UNDEFINED 代替， 如果已经不在意已经存在与图像中的内容
+			barrier.newLayout = newLayout;
+
+			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; //  针对传输队列蔟的属猪使用barrier 需要 queue cluster的索引，如果不关系，则 ignored (不是默认值）
+			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+			barrier.image = image;
+	
+			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+			barrier.subresourceRange.baseMipLevel = 0;
+			barrier.subresourceRange.levelCount = 1;
+			barrier.subresourceRange.baseArrayLayer = 0;
+			barrier.subresourceRange.layerCount = 1;
+
+		}
+		VkPipelineStageFlags sourceStage;
+		VkPipelineStageFlags destinationStage;
+		{
+			if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+			{
+
+				barrier.srcAccessMask = 0;
+				barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+				sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+				destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+			}
+			else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+			{
+
+				barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+				sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+				destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+			}
+			else {
+				throw std::invalid_argument("unsupported layout transition!");
+			}
+		}
+
+		vkCmdPipelineBarrier(
+			commandBuffer,
+			sourceStage, destinationStage,
+			0,
+			0, nullptr,
+			0, nullptr,
+			1, &barrier
+		);
+
+
+		endSingleTimeCommands(commandBuffer);
+	}
+
+	void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height)
+	{
+		VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+		VkBufferImageCopy region = {};
+		{
+			region.bufferOffset = 0;
+			region.bufferRowLength = 0; // 在内存中额布局
+			region.bufferImageHeight = 0;
+
+			region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			region.imageSubresource.mipLevel = 0;
+			region.imageSubresource.baseArrayLayer = 0;
+			region.imageSubresource.layerCount = 1;
+
+			region.imageOffset = { 0, 0, 0 };
+			region.imageExtent = { width, height, 1 };
+		}
+
+		vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+		endSingleTimeCommands(commandBuffer);
+	}
+
 private:
 
 	static VKAPI_ATTR VkBool32 VKAPI_CALL
@@ -1877,7 +2089,7 @@ private:
 			const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
 			void* pUserData)
 	{
-		std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
+		std::cerr << "[ Validation Layer ] --> " << pCallbackData->pMessage << std::endl;
 
 		return VK_FALSE;
 	}
