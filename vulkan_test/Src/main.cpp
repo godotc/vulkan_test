@@ -27,10 +27,7 @@
 #include"UniformBufferObject.h"
 
 
-void throwRE(std::string info)
-{
-	throw std::runtime_error(info);
-}
+#define throwRE(x) do { throw std::runtime_error(x); } while (0);
 
 
 const int WIDTH = 800;
@@ -172,6 +169,8 @@ private:
 	VkPipeline m_graphicsPipeLine;	// drawing 时 GPU 需要的状态信息集合结构体，包含如shader,光栅化,depth等
 	VkRenderPass m_renderPass;	// 包含渲染等所有drawing命令在内完成, attachhment,subpass
 
+	VkDescriptorPool m_descriptorPool;
+	VkDescriptorSet m_descriptorSet;
 	VkDescriptorSetLayout m_descriptorSetLayout; //描述符布局组合在一个对象中
 	VkPipelineLayout m_pipelineLayout;	// 管线布局 linera 、 Optimal(tile平铺)·
 
@@ -182,7 +181,7 @@ private:
 	VkBuffer m_indexBuffer;
 	VkDeviceMemory m_indexBufferMemory;
 
-	VkBuffer m_uniformBUffer;
+	VkBuffer m_uniformBuffer;
 	VkDeviceMemory m_uniformBUfferMemory;
 
 	VkCommandPool m_commandPool;	// 命令池：储存缓存区的内存 不能直接调用函数进行绘制或内存操作等， 而是写入命令缓存区来调用
@@ -225,6 +224,9 @@ private:
 		createIndexBuffer();
 		createUniformBuffer();
 
+		createDescriptorPool();
+		createDescriptorSet();
+
 		createCommandBuffers();
 		createSemphores();
 	}
@@ -236,35 +238,27 @@ private:
 			glfwPollEvents();
 
 			updateUniformBuffer();
-			drawFrame();
-		}
 
+			drawFrame();
+
+			vkDeviceWaitIdle(m_logicalDevice);
+
+		}
 		vkDeviceWaitIdle(m_logicalDevice);
 	}
 
-	void cleanupSwapChain()
-	{
-		for (size_t i = 0; i < m_swapChainFrameBuffers.size(); ++i)
-		{
-			vkDestroyFramebuffer(m_logicalDevice, m_swapChainFrameBuffers[i], nullptr);
-		}
-		vkDestroyPipeline(m_logicalDevice, m_graphicsPipeLine, nullptr);
-		vkDestroyPipelineLayout(m_logicalDevice, m_pipelineLayout, nullptr);
-		vkDestroyRenderPass(m_logicalDevice, m_renderPass, nullptr);
-		for (size_t i = 0; i < m_swapChainImageViews.size(); ++i)
-		{
-			vkDestroyImageView(m_logicalDevice, m_swapChainImageViews[i], nullptr);
-		}
-		vkDestroySwapchainKHR(m_logicalDevice, m_swapChain, nullptr);
-	}
+
 
 	void cleanup()
 	{
+		vkDeviceWaitIdle(m_logicalDevice);
+
 		cleanupSwapChain();
 
+		vkDestroyDescriptorPool(m_logicalDevice, m_descriptorPool, nullptr);
 		vkDestroyDescriptorSetLayout(m_logicalDevice, m_descriptorSetLayout, nullptr);
 
-		vkDestroyBuffer(m_logicalDevice, m_uniformBUffer, nullptr);
+		vkDestroyBuffer(m_logicalDevice, m_uniformBuffer, nullptr);
 		vkFreeMemory(m_logicalDevice, m_uniformBUfferMemory, nullptr);
 
 		vkDestroyBuffer(m_logicalDevice, m_indexBuffer, nullptr);
@@ -577,8 +571,8 @@ private:
 				VK_ATTACHMENT_STORE_OP_DONT_CARE : 帧缓冲区的内容在渲染操作完毕后设置为undefined
 				我们要做的是渲染一个三角形在屏幕上，所以我们选择存储操作。
 			*/
-			colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; // 当不画三角形的时候，需要清除掉上一帧的画面
+			colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE; // 保存渲染的内容
 
 			/*
 			loadOp和storeOp应用在颜色和深度数据，同时stencilLoadOp / stencilStoreOp应用在模版数据。我们的应用程序不会做任何模版缓冲区的操作，所以它的loading和storing无关紧要。
@@ -790,7 +784,8 @@ private:
 
 			rasterizer.lineWidth = 1.0f;
 			rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;	// culling/font faces/call back facess/all 面裁剪的方式
-			rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE; // 顺时针/逆时针 顶点绘制顺序
+			//rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE; // 顺时针/逆时针 顶点绘制顺序
+			rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;  /// 翻转 y 轴后采用逆时针绘制
 
 			// 深度值 config 这次设为false
 			rasterizer.depthBiasEnable = VK_FALSE;
@@ -1017,7 +1012,7 @@ private:
 			VK_BUFFER_USAGE_TRANSFER_SRC_BIT：缓冲区可以用于源内存传输操作。
 			VK_BUFFER_USAGE_TRANSFER_DST_BIT：缓冲区可以用于目标内存传输操作。
 		*/
-		createBuffer(buffersize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+		createBuffer(buffersize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
 
 
 
@@ -1028,7 +1023,7 @@ private:
 		vkUnmapMemory(m_logicalDevice, stagingBufferMemory); // 停止映射
 
 		// 创建 设备上 在 cpu访存上的 map
-		createBuffer(buffersize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, m_vertexBuffer, m_vertexBufferMemory);
+		createBuffer(buffersize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_vertexBuffer, m_vertexBufferMemory);
 
 
 		//  从已经拷贝完的map区域 stagingBuffer, 拷贝到同样map的 device 的 m_vertexBuffer 区域
@@ -1069,7 +1064,75 @@ private:
 	{
 		VkDeviceSize buffersize = sizeof(UniformBufferObject);
 
-		createBuffer(buffersize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, m_uniformBUffer, m_uniformBUfferMemory);
+		createBuffer(buffersize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, m_uniformBuffer, m_uniformBUfferMemory);
+	}
+
+	void createDescriptorPool()
+	{
+		VkDescriptorPoolSize poolSize = {};
+		{
+			poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			poolSize.descriptorCount = 1;
+		}
+
+		VkDescriptorPoolCreateInfo poolInfo = {};
+		{
+			poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+			poolInfo.poolSizeCount = 1;
+			poolInfo.pPoolSizes = &poolSize;
+
+			poolInfo.maxSets = 1; // 最大描述符集合
+		}
+
+		if (vkCreateDescriptorPool(m_logicalDevice, &poolInfo, nullptr, &m_descriptorPool) != VK_SUCCESS)
+		{
+			throwRE("failed to create descripor pool!");
+		}
+	}
+
+	void createDescriptorSet()
+	{
+		// 分配 m_descriptor set 空间
+		VkDescriptorSetLayout layouts[] = { m_descriptorSetLayout };
+		VkDescriptorSetAllocateInfo allocInfo = {};
+		{
+			allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+			allocInfo.descriptorPool = m_descriptorPool;
+			allocInfo.descriptorSetCount = 1;
+			allocInfo.pSetLayouts = layouts;
+		}
+		if (vkAllocateDescriptorSets(m_logicalDevice, &allocInfo, &m_descriptorSet)) // 分配一个具有uniform buufer 描述符的集合
+		{
+			throwRE("failed to allocate descriptor set!");
+		}
+
+		// 配置内部描述符 而 需要的引用一块缓冲区
+		VkDescriptorBufferInfo bufferInfo = {};
+		{
+			bufferInfo.buffer = m_uniformBuffer;
+			bufferInfo.offset = 0;
+			bufferInfo.range = sizeof(UniformBufferObject);
+		}
+
+		// 配置的内容
+		VkWriteDescriptorSet descriptorWrite = {};
+		{
+			descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+
+			descriptorWrite.dstSet = m_descriptorSet;
+			descriptorWrite.dstBinding = 0;
+			descriptorWrite.dstArrayElement = 0;
+
+			descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			descriptorWrite.descriptorCount = 1;
+
+			descriptorWrite.pBufferInfo = &bufferInfo;// 本set 基于缓冲区的所以选用 pBufferInfo
+			descriptorWrite.pImageInfo = nullptr; //  Optional  
+			descriptorWrite.pTexelBufferView = nullptr; // Optional
+		}
+
+		// 应用实际的更新 分配完成
+		vkUpdateDescriptorSets(m_logicalDevice, 1, &descriptorWrite, 0, nullptr);
 	}
 
 	void createCommandBuffers()
@@ -1142,6 +1205,9 @@ private:
 			/// </vkCmdBeginRenderPass>
 
 			// 4. 基本绘图命令
+			/// 绑定实际shader 的 descriptor 中
+			/// 与顶点与索引不同， 描述符集合 不是graphicsPipeline 唯一的，因此需要指定是否将 descriptorSet 绑定到图形或则计算管线
+			vkCmdBindDescriptorSets(m_commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
 
 			/// 绑定管线
 			vkCmdBindPipeline(m_commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeLine);
@@ -1153,6 +1219,7 @@ private:
 
 			/// 绑定索引缓冲区
 			vkCmdBindIndexBuffer(m_commandBuffers[i], m_indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
 
 			/// 使用 vkCmdDrawIndexed 替代，复用顶点
 			//vkCmdDraw(m_commandBuffers[i], static_cast<uint32_t>(vertices.size()), 1, 0, 0);
@@ -1205,12 +1272,30 @@ private:
 		createCommandBuffers();
 	}
 
+	void cleanupSwapChain()
+	{
+
+		for (size_t i = 0; i < m_swapChainFrameBuffers.size(); ++i)
+		{
+			vkDestroyFramebuffer(m_logicalDevice, m_swapChainFrameBuffers[i], nullptr);
+		}
+
+		vkDestroyPipeline(m_logicalDevice, m_graphicsPipeLine, nullptr);
+		vkDestroyPipelineLayout(m_logicalDevice, m_pipelineLayout, nullptr);
+		vkDestroyRenderPass(m_logicalDevice, m_renderPass, nullptr);
+
+		for (size_t i = 0; i < m_swapChainImageViews.size(); ++i)
+		{
+			vkDestroyImageView(m_logicalDevice, m_swapChainImageViews[i], nullptr);
+		}
+
+		vkDestroySwapchainKHR(m_logicalDevice, m_swapChain, nullptr);
+	}
 
 private:
 
 	void drawFrame()
 	{
-
 
 		// 1. 创建信号量 : creteSemphores() in initVulkan()
 		// 2. 从交换链获取图像
@@ -1223,13 +1308,19 @@ private:
 		这就是开始绘制的时间点。它可以指定一个信号量semaphore或者栅栏或者两者。出于目的性，我们会使用imageAvailableSemaphore。
 		最后的参数指定交换链中成为available状态的图像对应的索引。其中索引会引用交换链图像数组swapChainImages的图像VkImage。我们使用这个索引选择正确的命令缓冲区。
 		*/
+
+		vkQueueWaitIdle(m_presentQueue);
+
 		if (result == VK_ERROR_OUT_OF_DATE_KHR) {// swap chain 与 surface 不再兼容，不可进行渲染
+			std::cout << "Swap chain no compatible with surface! Adjusting... " << std::endl;
 			recreateSwapChain();
 			return;
 		}
 		else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) { // SUPOPTIMAL 交换链仍可以向surface提交图像，但是surface的熟悉不再匹配准确，比如平台可能重新调整图像的尺寸适应大小
 			throw std::runtime_error("failed to acquire swap chain image");
 		}
+
+
 
 		// 3. 提交命令缓冲区
 		VkSubmitInfo submitInfo = {};
@@ -1273,16 +1364,16 @@ private:
 		}
 
 		result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
-		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) 
+		{
+			std::cout << "warn of present queue" << std::endl;
 			recreateSwapChain();
 		}
 		else if (result != VK_SUCCESS) {
 			throw std::runtime_error("failed to present image/imageIndex to swapchain!");
 		}
 
-		vkQueueWaitIdle(m_presentQueue);
 	}
-
 
 
 private:
@@ -1731,7 +1822,7 @@ private:
 		vkFreeCommandBuffers(m_logicalDevice, m_commandPool, 1, &commandBuffer);
 	}
 
-	void updateUniformBUffer()
+	void updateUniformBuffer()
 	{
 		using clock = std::chrono::high_resolution_clock;
 
@@ -1752,7 +1843,7 @@ private:
 
 			// Fov 45度角， 宽高比， 近/远裁剪面
 			ubo.proj = glm::perspective(glm::radians(45.0f), m_swapChainExtent.width / (float)m_swapChainExtent.height, 0.1f, 10.0f);
-			
+
 			// GLM 为 openGL 设计的， 他的裁剪坐标(proj.y)与vulkan相反
 			ubo.proj[1][1] *= -1;
 		}
