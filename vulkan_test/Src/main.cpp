@@ -5,8 +5,9 @@
 
 #define GLM_FORECE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ON
-#include<glm/vec4.hpp>
-#include<glm/mat4x4.hpp>
+#include<glm/glm.hpp>
+#include<glm/gtc/matrix_transform.hpp>
+
 
 
 #include<set>
@@ -19,8 +20,11 @@
 #include <functional>
 #include<optional>
 #include<fstream>
+#include<chrono>
+
 
 #include "Vertex.h"
+#include"UniformBufferObject.h"
 
 
 void throwRE(std::string info)
@@ -167,12 +171,19 @@ private:
 
 	VkPipeline m_graphicsPipeLine;	// drawing 时 GPU 需要的状态信息集合结构体，包含如shader,光栅化,depth等
 	VkRenderPass m_renderPass;	// 包含渲染等所有drawing命令在内完成, attachhment,subpass
+
+	VkDescriptorSetLayout m_descriptorSetLayout; //描述符布局组合在一个对象中
 	VkPipelineLayout m_pipelineLayout;	// 管线布局 linera 、 Optimal(tile平铺)·
+
 
 	VkBuffer m_vertexBuffer;
 	VkDeviceMemory m_vertexBufferMemory;
+
 	VkBuffer m_indexBuffer;
 	VkDeviceMemory m_indexBufferMemory;
+
+	VkBuffer m_uniformBUffer;
+	VkDeviceMemory m_uniformBUfferMemory;
 
 	VkCommandPool m_commandPool;	// 命令池：储存缓存区的内存 不能直接调用函数进行绘制或内存操作等， 而是写入命令缓存区来调用
 	std::vector<VkCommandBuffer> m_commandBuffers; // 命令缓冲区
@@ -205,12 +216,14 @@ private:
 		createSwapChain();
 		createImageViews();
 		createRenderPass();
+		createDescriptorSetLayout();
 		createGraphicsPipeline();
 		createFramebuffers();
 		createCommandPool();
 
 		createVertexBuffer();
 		createIndexBuffer();
+		createUniformBuffer();
 
 		createCommandBuffers();
 		createSemphores();
@@ -222,10 +235,11 @@ private:
 		{
 			glfwPollEvents();
 
+			updateUniformBuffer();
 			drawFrame();
-
-			vkDeviceWaitIdle(m_logicalDevice);
 		}
+
+		vkDeviceWaitIdle(m_logicalDevice);
 	}
 
 	void cleanupSwapChain()
@@ -247,6 +261,11 @@ private:
 	void cleanup()
 	{
 		cleanupSwapChain();
+
+		vkDestroyDescriptorSetLayout(m_logicalDevice, m_descriptorSetLayout, nullptr);
+
+		vkDestroyBuffer(m_logicalDevice, m_uniformBUffer, nullptr);
+		vkFreeMemory(m_logicalDevice, m_uniformBUfferMemory, nullptr);
 
 		vkDestroyBuffer(m_logicalDevice, m_indexBuffer, nullptr);
 		vkFreeMemory(m_logicalDevice, m_indexBufferMemory, nullptr);
@@ -632,6 +651,31 @@ private:
 
 	}
 
+	void createDescriptorSetLayout()
+	{
+		VkDescriptorSetLayoutBinding uboLayoutBinding = {};
+		{
+			uboLayoutBinding.binding = 0;
+			uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; // 指定 binding 为 uniform 对象
+			uboLayoutBinding.descriptorCount = 1;
+
+			uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT; // 定义描述符着色器在那个阶段使用，这里只在顶点
+			uboLayoutBinding.pImmutableSamplers = nullptr; // 仅仅与图像采集有关 Optional
+		}
+
+		VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+		{
+			layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+			layoutInfo.bindingCount = 1;
+			layoutInfo.pBindings = &uboLayoutBinding;
+		}
+
+		if (vkCreateDescriptorSetLayout(m_logicalDevice, &layoutInfo, nullptr, &m_descriptorSetLayout) != VK_SUCCESS)
+		{
+			throw std::runtime_error("failed to create descriptor set layout!");
+		}
+	}
+
 	void createGraphicsPipeline()
 	{
 		/************************** Shader Stages ***********************************************/
@@ -828,8 +872,8 @@ private:
 		VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
 		{
 			pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-			pipelineLayoutCreateInfo.setLayoutCount = 0; // Optional
-			pipelineLayoutCreateInfo.pSetLayouts = nullptr;	//Optional
+			pipelineLayoutCreateInfo.setLayoutCount = 1;
+			pipelineLayoutCreateInfo.pSetLayouts = &m_descriptorSetLayout; // 使用成员变量持有的layout(createDescriptorSetLayout())
 			pipelineLayoutCreateInfo.pushConstantRangeCount = 0;	//Optional
 			pipelineLayoutCreateInfo.pPushConstantRanges = 0;	//Optional
 		}
@@ -1019,6 +1063,13 @@ private:
 		vkDestroyBuffer(m_logicalDevice, stagingBuffer, nullptr);
 		vkFreeMemory(m_logicalDevice, stagingBufferMemory, nullptr);
 
+	}
+
+	void createUniformBuffer()
+	{
+		VkDeviceSize buffersize = sizeof(UniformBufferObject);
+
+		createBuffer(buffersize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, m_uniformBUffer, m_uniformBUfferMemory);
 	}
 
 	void createCommandBuffers()
@@ -1678,6 +1729,39 @@ private:
 
 		// 删除临时命令缓冲区
 		vkFreeCommandBuffers(m_logicalDevice, m_commandPool, 1, &commandBuffer);
+	}
+
+	void updateUniformBUffer()
+	{
+		using clock = std::chrono::high_resolution_clock;
+
+		static auto startTime = clock::now(); // static 开始时间
+		auto currentTime = clock::now();
+
+		// 计算时间来控制旋转的比例
+		float time = std::chrono::duration_cast<std::chrono::milliseconds>
+			(currentTime - startTime).count() / 1000.0f;
+
+		UniformBufferObject ubo = {};
+		{
+			//  归一化mat、 旋转角度、 旋转轴
+			ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+			// 视角方向（角度）、中心位置、头顶指向方向
+			ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+			// Fov 45度角， 宽高比， 近/远裁剪面
+			ubo.proj = glm::perspective(glm::radians(45.0f), m_swapChainExtent.width / (float)m_swapChainExtent.height, 0.1f, 10.0f);
+			
+			// GLM 为 openGL 设计的， 他的裁剪坐标(proj.y)与vulkan相反
+			ubo.proj[1][1] *= -1;
+		}
+
+		// 将 ubo 对象拷贝到创建好的 uniformBufferMemory 中
+		void* data;
+		vkMapMemory(m_logicalDevice, m_uniformBUfferMemory, 0, sizeof(ubo), 0, &data);
+		memcpy(data, &ubo, sizeof(ubo));
+		vkUnmapMemory(m_logicalDevice, m_uniformBUfferMemory);
 	}
 
 private:
