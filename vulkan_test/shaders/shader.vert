@@ -9,10 +9,10 @@ layout(set = 0, binding = 0) uniform UniformBufferObject{ // Í³Ò»±äÁ¿£¬£¨ÔËĞĞÊ±Í
 
 layout(location =0) in vec2 inPosition; // ´«Èë ¶¥µã
 layout(location =1) in vec3 inColor;  // ´«ÈëÑÕÉ«
+layout(location =2) in vec2 inTexCoord; // ÎÆÀíÌùÍ¼×ø±ê
 
-layout (location =0 ) out vec3 fragColor;	// ´«³öÑÕÉ«
-
-
+layout(location =0) out vec3 fragColor;	// ´«³öÑÕÉ«
+layout(location =1) out vec2 fragTexCoord;  // ´«³öÎÆÀí×ø±êµ½ fragmentShader
 
 
 
@@ -26,4 +26,6 @@ void main()
 	gl_Position = ubo.proj * ubo.view * ubo.model * vec4(inPosition, 0.0, 1.0);
 
 	fragColor = inColor;
+
+	fragTexCoord =  inTexCoord;
 }

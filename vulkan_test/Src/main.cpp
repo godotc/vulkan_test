@@ -105,6 +105,8 @@ struct QueueFamilyIndices
 	{
 		return graphicsFamily >= 0 && presentFamily >= 0;
 	}
+
+
 };
 
 struct SwapChainSupportDetails
@@ -116,10 +118,11 @@ struct SwapChainSupportDetails
 
 
 const std::vector<Vertex> gb_vertices = {
-	{{ -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-	{{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
-	{{  0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
-	{{ -0.5f, 0.5f},  {1.0f, 1.0f, 1.0f}}
+	// 顶点 ， rgb ， texture 四角坐标 （因为opengl绘制而反转了y轴，逆时针输入，顺时针输入则图像翻折）
+	{{ -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f},{1.0f,0.0f}},
+	{{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f,0.0f}},
+	{{  0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f,1.0f}},
+	{{ -0.5f, 0.5f},  {1.0f, 1.0f, 1.0f},{1.0f,1.0f}}
 };
 
 const std::vector<uint16_t> gb_indices = {
@@ -270,6 +273,7 @@ private:
 		cleanupSwapChain();
 
 		vkDestroySampler(m_logicalDevice, m_textureSampler, nullptr);
+
 		vkDestroyImageView(m_logicalDevice, m_textureImageView, nullptr);
 
 		vkDestroyImage(m_logicalDevice, m_textureImage, nullptr);
@@ -644,6 +648,7 @@ private:
 
 	void createDescriptorSetLayout()
 	{
+		// UBO layout
 		VkDescriptorSetLayoutBinding uboLayoutBinding = {};
 		{
 			uboLayoutBinding.binding = 0;
@@ -654,17 +659,33 @@ private:
 			uboLayoutBinding.pImmutableSamplers = nullptr; // 仅仅与图像采集有关 Optional
 		}
 
+		// sampler layout
+		VkDescriptorSetLayoutBinding samplerLayoutBinding = {};
+		{
+			samplerLayoutBinding.binding = 1;
+			samplerLayoutBinding.descriptorCount = 1;
+			samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			samplerLayoutBinding.pImmutableSamplers = nullptr;
+			samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		}
+
+
+		// 创建 layouts
+		std::array<VkDescriptorSetLayoutBinding, 2> bindings = { uboLayoutBinding,samplerLayoutBinding };
+
 		VkDescriptorSetLayoutCreateInfo layoutInfo = {};
 		{
 			layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-			layoutInfo.bindingCount = 1;
-			layoutInfo.pBindings = &uboLayoutBinding;
+			layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+			layoutInfo.pBindings = bindings.data();
 		}
 
 		if (vkCreateDescriptorSetLayout(m_logicalDevice, &layoutInfo, nullptr, &m_descriptorSetLayout) != VK_SUCCESS)
 		{
-			throw std::runtime_error("failed to create descriptor set layout!");
+			throwRE("failed to create descriptor set laytout");
 		}
+
+
 	}
 
 	void createGraphicsPipeline()
@@ -1058,7 +1079,7 @@ private:
 			///在这里使用什么样的寻址模式并不重要，因为我们不会在图像之外进行采样。
 			///但是循环模式是普遍使用的一种模式，因为它可以用来实现诸如瓦片地面和墙面的纹理效果。
 			/// </addressMode>
-			samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT; // repeat 当 texCoord 大于[0,1]时，多余的循环绘制，[0,2] 就为4宫格
 			samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 			samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 
@@ -1162,17 +1183,20 @@ private:
 
 	void createDescriptorPool()
 	{
-		VkDescriptorPoolSize poolSize = {};
+		std::array<VkDescriptorPoolSize, 2> poolSizes = {};
 		{
-			poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-			poolSize.descriptorCount = 1;
+			poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			poolSizes[0].descriptorCount = 1;
+
+			poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			poolSizes[1].descriptorCount = 1;
 		}
 
 		VkDescriptorPoolCreateInfo poolInfo = {};
 		{
 			poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-			poolInfo.poolSizeCount = 1;
-			poolInfo.pPoolSizes = &poolSize;
+			poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+			poolInfo.pPoolSizes = poolSizes.data();
 
 			poolInfo.maxSets = 1; // 最大描述符集合
 		}
@@ -1200,6 +1224,7 @@ private:
 		}
 
 		// 配置内部描述符 而 需要的引用一块缓冲区
+		// 更新 ubo 的 layout 信息
 		VkDescriptorBufferInfo bufferInfo = {};
 		{
 			bufferInfo.buffer = m_uniformBuffer;
@@ -1207,25 +1232,43 @@ private:
 			bufferInfo.range = sizeof(UniformBufferObject);
 		}
 
-		// 配置的内容
-		VkWriteDescriptorSet descriptorWrite = {};
+		//  更新 组合图像采集器结构体的  layout 信息
+		VkDescriptorImageInfo imageInfo = {};
 		{
-			descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			imageInfo.imageView = m_textureImageView;
+			imageInfo.sampler = m_textureSampler;
+		}
 
-			descriptorWrite.dstSet = m_descriptorSet;
-			descriptorWrite.dstBinding = 0;
-			descriptorWrite.dstArrayElement = 0;
+		// 配置的内容
+		std::array<VkWriteDescriptorSet, 2> descriptorWrites = {};
+		{
+			descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 
-			descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-			descriptorWrite.descriptorCount = 1;
+			descriptorWrites[0].dstSet = m_descriptorSet;
+			descriptorWrites[0].dstBinding = 0;
+			descriptorWrites[0].dstArrayElement = 0;
 
-			descriptorWrite.pBufferInfo = &bufferInfo;// 本set 基于缓冲区的所以选用 pBufferInfo
-			descriptorWrite.pImageInfo = nullptr; //  Optional  
-			descriptorWrite.pTexelBufferView = nullptr; // Optional
+			descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			descriptorWrites[0].descriptorCount = 1;
+
+			descriptorWrites[0].pBufferInfo = &bufferInfo;// 本set 基于缓冲区的所以选用 pBufferInfo
+			descriptorWrites[0].pImageInfo = nullptr; //  Optional  
+			descriptorWrites[0].pTexelBufferView = nullptr; // Optional
+
+			descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			descriptorWrites[1].dstSet = m_descriptorSet;
+			descriptorWrites[1].dstBinding = 1;
+			descriptorWrites[1].dstArrayElement = 0;
+			descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			descriptorWrites[1].descriptorCount = 1;
+			descriptorWrites[1].pBufferInfo = nullptr;
+			descriptorWrites[1].pImageInfo = &imageInfo;  // 这里选用 pImage
+			descriptorWrites[1].pTexelBufferView = nullptr;
 		}
 
 		// 应用实际的更新 分配完成
-		vkUpdateDescriptorSets(m_logicalDevice, 1, &descriptorWrite, 0, nullptr);
+		vkUpdateDescriptorSets(m_logicalDevice, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 	}
 
 	void createCommandBuffers()

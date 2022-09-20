@@ -13,6 +13,7 @@ struct Vertex
 {
 	glm::vec2 pos;
 	glm::vec3 color;
+	glm::vec2 texCoord;
 
 
 	static VkVertexInputBindingDescription getBindingDescription()
@@ -32,10 +33,10 @@ struct Vertex
 		return bindingDescription;
 	}
 
-	static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions()
+	static std::array<VkVertexInputAttributeDescription, 3> getAttributeDescriptions()
 	{
 		// 顶点属性
-		std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions = {};
+		std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions = {};
 		{
 			// 顶点段 2 floats vec2
 			attributeDescriptions[0].binding = 0;
@@ -59,6 +60,12 @@ struct Vertex
 			attributeDescriptions[1].location = 1;
 			attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
 			attributeDescriptions[1].offset = offsetof(Vertex, color);
+
+			//  纹理贴图的坐标(四角的一角） floats vec2 
+			attributeDescriptions[2].binding = 0;
+			attributeDescriptions[2].location = 2;
+			attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
+			attributeDescriptions[2].offset = offsetof(Vertex, texCoord);
 		}
 
 		return attributeDescriptions;
