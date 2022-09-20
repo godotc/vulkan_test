@@ -119,15 +119,20 @@ struct SwapChainSupportDetails
 
 const std::vector<Vertex> gb_vertices = {
 	// 顶点 ， rgb ， texture 四角坐标 （因为opengl绘制而反转了y轴，逆时针输入，顺时针输入则图像翻折）
-	{{ -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f},{1.0f,0.0f}},
-	{{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f,0.0f}},
-	{{  0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f,1.0f}},
-	{{ -0.5f, 0.5f},  {1.0f, 1.0f, 1.0f},{1.0f,1.0f}}
+	{{ -0.5f, -0.5f,0.0f}, {1.0f, 0.0f, 0.0f},{0.0f,0.0f}},
+	{{ 0.5f, -0.5f,0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f,0.0f}},
+	{{  0.5f, 0.5f,0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f,1.0f}},
+	{{ -0.5f, 0.5f,0.0f},  {1.0f, 1.0f, 1.0f},{0.0f,1.0f}},
+
+	{{ -0.5f, -0.5f,-0.5f}, {1.0f, 0.0f, 0.0f},{0.0f,0.0f}},
+	{{ 0.5f, -0.5f,-0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f,0.0f}},
+	{{  0.5f, 0.5f,-0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f,1.0f}},
+	{{ -0.5f, 0.5f,-0.5f},  {1.0f, 1.0f, 1.0f},{0.0f,1.0f}}
 };
 
 const std::vector<uint16_t> gb_indices = {
-	0,1,2,
-	2,3,0
+	0,1,2,0,2,3,
+	4,5,6,4,6,7
 };
 
 
@@ -195,7 +200,11 @@ private:
 	VkImage m_textureImage;
 	VkDeviceMemory  m_textureImageMemory;
 	VkImageView m_textureImageView; // 保存 纹理图像
-	VkSampler m_textureSampler; // 采样
+	VkSampler m_textureSampler; // texture采样
+
+	VkImage m_depthImage;
+	VkDeviceMemory m_depthImageMemory;
+	VkImageView m_depthImageView;
 
 	VkCommandPool m_commandPool;	// 命令池：储存缓存区的内存 不能直接调用函数进行绘制或内存操作等， 而是写入命令缓存区来调用
 	std::vector<VkCommandBuffer> m_commandBuffers; // 命令缓冲区
@@ -231,6 +240,9 @@ private:
 		createDescriptorSetLayout();
 		createGraphicsPipeline();
 		createFramebuffers();
+
+		createDepthResources();
+
 		createCommandPool();
 
 		createTextureImage();
@@ -311,7 +323,7 @@ private:
 		glfwTerminate();
 	}
 
-private:
+private: // 初始化阶段
 
 	void createInstance()
 	{
@@ -1008,6 +1020,22 @@ private:
 
 	}
 
+	void createDepthResources()
+	{
+		/// <summary>
+		/// 不像纹理贴图，我们不一定需要特定的格式，因为我们不会直接从程序中访问纹素。
+		/// 它仅仅需要一个合理的准确性，至少24位在实际程序中是常见的。有几种符合要求的格式：
+		///	  VK_FORMAT_D32_SFLOAT : 32 - bit float depth
+		///	  VK_FORMAT_D32_SFLOAT_S8_UNIT : 32 - bit signed float depth 和 8 - bit stencil component
+		///	  VK_FORMAT_D32_UNORM_S8_UINT : 24 - bit float depth 和 8 - bit stencil component
+		/// stencil component 模版组件用于模版测试(stencil tests)，这是可以与深度测试组合的附加测试。我们将在未来的章节中展开。
+		/// 我们可以简化为 VK_FORMAT_D32_SFLOAT 格式，因为它的支持是非常常见的，但是尽可能的添加一些额外的灵活性也是很好的。
+		/// 我们增加一个函数 findSupportedFormat 从候选格式列表中 根据期望值的降序原则，检测第一个得到支持的格式。
+		/// </summary>
+
+		VkFormat depthFormat = findDepthForamt();
+	}
+
 	void createTextureImage()
 	{
 		// TODO(enchance): 把这个功能归为一个类，而不是用死的成员变量只能传入一张图片
@@ -1395,7 +1423,7 @@ private:
 		}
 	}
 
-private:
+private: // 批量 重定向 操作
 
 	void recreateSwapChain() {
 		vkDeviceWaitIdle(m_logicalDevice); // 不触碰正在使用中的资源
@@ -1430,7 +1458,7 @@ private:
 		vkDestroySwapchainKHR(m_logicalDevice, m_swapChain, nullptr);
 	}
 
-private:
+private: // mainLoop 阶段函数
 
 	void drawFrame()
 	{
@@ -1513,8 +1541,40 @@ private:
 
 	}
 
+	void updateUniformBuffer()
+	{
+		using clock = std::chrono::high_resolution_clock;
 
-private:
+		static auto startTime = clock::now(); // static 开始时间
+		auto currentTime = clock::now();
+
+		// 计算时间来控制旋转的比例
+		float time = std::chrono::duration_cast<std::chrono::milliseconds>
+			(currentTime - startTime).count() / 1000.0f;
+
+		UniformBufferObject ubo = {};
+		{
+			//  归一化mat、 旋转角度、 旋转轴
+			ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+			// 视角方向（角度）、中心位置、头顶指向方向
+			ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+			// Fov 45度角， 宽高比， 近/远裁剪面
+			ubo.proj = glm::perspective(glm::radians(45.0f), m_swapChainExtent.width / (float)m_swapChainExtent.height, 0.1f, 10.0f);
+
+			// GLM 为 openGL 设计的， 他的裁剪坐标(proj.y)与vulkan相反
+			ubo.proj[1][1] *= -1;
+		}
+
+		// 将 ubo 对象拷贝到创建好的 uniformBufferMemory 中
+		void* data;
+		vkMapMemory(m_logicalDevice, m_uniformBUfferMemory, 0, sizeof(ubo), 0, &data);
+		memcpy(data, &ubo, sizeof(ubo));
+		vkUnmapMemory(m_logicalDevice, m_uniformBUfferMemory);
+	}
+
+private: // 抽象出功能函数
 
 	void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& debugCreatInfo)
 	{
@@ -1935,38 +1995,6 @@ private:
 		endSingleTimeCommands(commandBuffer);
 	}
 
-	void updateUniformBuffer()
-	{
-		using clock = std::chrono::high_resolution_clock;
-
-		static auto startTime = clock::now(); // static 开始时间
-		auto currentTime = clock::now();
-
-		// 计算时间来控制旋转的比例
-		float time = std::chrono::duration_cast<std::chrono::milliseconds>
-			(currentTime - startTime).count() / 1000.0f;
-
-		UniformBufferObject ubo = {};
-		{
-			//  归一化mat、 旋转角度、 旋转轴
-			ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-
-			// 视角方向（角度）、中心位置、头顶指向方向
-			ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-
-			// Fov 45度角， 宽高比， 近/远裁剪面
-			ubo.proj = glm::perspective(glm::radians(45.0f), m_swapChainExtent.width / (float)m_swapChainExtent.height, 0.1f, 10.0f);
-
-			// GLM 为 openGL 设计的， 他的裁剪坐标(proj.y)与vulkan相反
-			ubo.proj[1][1] *= -1;
-		}
-
-		// 将 ubo 对象拷贝到创建好的 uniformBufferMemory 中
-		void* data;
-		vkMapMemory(m_logicalDevice, m_uniformBUfferMemory, 0, sizeof(ubo), 0, &data);
-		memcpy(data, &ubo, sizeof(ubo));
-		vkUnmapMemory(m_logicalDevice, m_uniformBUfferMemory);
-	}
 
 	void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usageBits, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory)
 	{
@@ -2188,7 +2216,48 @@ private:
 		return  imageView;
 	}
 
-private:
+	VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features)
+	{
+		for (VkFormat format : candidates)
+		{
+			VkFormatProperties properties;
+			vkGetPhysicalDeviceFormatProperties(m_physicalDevice, format, &properties);
+			/// <properties>
+			/// VkFormatProperties 结构体包含三个字段：
+			/// 	linearTilingFeatures : 使用线性平铺格式
+			/// 	optimalTilingFeatures : 使用最佳平铺格式
+			/// 	bufferFeatures : 支持缓冲区
+			///  只有前两个在这里是相关的，我们检查取决于函数的 tiling 平铺参数。
+			/// </properties>
+			if (tiling == VK_IMAGE_TILING_LINEAR && (properties.linearTilingFeatures & features) == features)
+			{
+				return format;
+			}
+			else if (tiling == VK_IMAGE_TILING_OPTIMAL && (properties.linearTilingFeatures & features) == features)
+			{
+				return format;
+			}
+		}
+
+		throwRE("failed to supported foramt!");
+	}
+
+	VkFormat findDepthForamt()
+	{
+		return findSupportedFormat(
+			{ VK_FORMAT_D32_SFLOAT,VK_FORMAT_D32_SFLOAT_S8_UINT,VK_FORMAT_D24_UNORM_S8_UINT },
+			VK_IMAGE_TILING_OPTIMAL,
+			VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+		);
+	}
+
+	// foarmat 是否支持 stencil test
+	bool hasStencilComponent(VkFormat format)
+	{
+		return format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D24_UNORM_S8_UINT;
+	}
+
+private: // static 函数
 
 	static VKAPI_ATTR VkBool32 VKAPI_CALL
 		debugReportCallback(

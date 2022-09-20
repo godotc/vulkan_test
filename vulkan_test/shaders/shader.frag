@@ -10,5 +10,5 @@ layout(location = 0) out vec4 outColor; // ´«³öäÖÈ¾ÑÕÉ«
 
 
 void main(){
-	outColor = vec4(texture(texSampler, fragTexCoord * 2.0)); // rgba
+	outColor = vec4(texture(texSampler, fragTexCoord * 1.0)); // rgba
 }
