@@ -239,11 +239,12 @@ private:
 		createRenderPass();
 		createDescriptorSetLayout();
 		createGraphicsPipeline();
-		createFramebuffers();
+
+		createCommandPool();
 
 		createDepthResources();
 
-		createCommandPool();
+		createFramebuffers();
 
 		createTextureImage();
 		createTextureImageView();
@@ -563,12 +564,13 @@ private: // 初始化阶段
 
 		for (size_t i = 0; i < m_swapChainImages.size(); ++i)
 		{
-			m_swapChainImageViews[i] = createImageView(m_swapChainImages[i], m_swapChainImageFormat);
+			m_swapChainImageViews[i] = createImageView(m_swapChainImages[i], m_swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT);
 		}
 	}
 
 	void createRenderPass()
 	{
+		// 颜色通道附件（需求）
 		VkAttachmentDescription colorAttachment = {};
 		{
 			colorAttachment.format = m_swapChainImageFormat;	// 与交换链中的图像格式匹配
@@ -603,23 +605,44 @@ private: // 初始化阶段
 			colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
 		}
-
 		// 子渲染通道需要 对前面定义一个或多个 attachment 的引用
 		VkAttachmentReference colorAttachmentRef = {};
 		colorAttachmentRef.attachment = 0;  // attchment 的索引
 		colorAttachmentRef.layout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL;
 
+		// 深度图的附件要求
+		VkAttachmentDescription depthAttachment = {};
+		{
+			depthAttachment.format = findDepthFormat();
+			depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+			depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;	// 清楚掉上一帧
+			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; // 不保存
+
+			depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+
+			depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		}
+		// 引用信息	
+		VkAttachmentReference depthAttachmentRef = {};
+		depthAttachmentRef.attachment = 1;
+		depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+
+
 		// Subpass 子通道
 		VkSubpassDescription subpass = {};
 		{
 			subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-			subpass.colorAttachmentCount = 1;
+			subpass.colorAttachmentCount = 1; // 只使用第一个深度模板附件
 			subpass.pColorAttachments = &colorAttachmentRef; // 在fragShader 中在使用 layout(locaiton=0)out vec4 outColor 来引用
 			/*可以被子通道引用的附件类型如下:
 				pInputAttachments: 附件从着色器中读取
 				pResolveAttachments : 附件用于颜色附件的多重采样
 				pDepthStencilAttachment : 附件用于深度和模版数据
 				pPreserveAttachments : 附件不被子通道使用，但是数据被保存*/
+			subpass.pDepthStencilAttachment = &depthAttachmentRef;
 		}
 
 		//  解决在管线的起始阶段 主渲染 和 子渲染通道 在进行转换处理时 没有获取图像的问题, 指定依赖关系、从属、操作发生的事件
@@ -635,13 +658,15 @@ private: // 初始化阶段
 			dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; // 阻止读写操作直到直到需要输入颜色时
 		}
 
+		std::array<VkAttachmentDescription, 2> attachments = { colorAttachment,depthAttachment };
+
 		// RenderPass creatInfo 渲染通道
 		VkRenderPassCreateInfo renderPassCreateInfo = {};
 		{
 			renderPassCreateInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 
-			renderPassCreateInfo.attachmentCount = 1;
-			renderPassCreateInfo.pAttachments = &colorAttachment;
+			renderPassCreateInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+			renderPassCreateInfo.pAttachments = attachments.data();
 
 			renderPassCreateInfo.subpassCount = 1;
 			renderPassCreateInfo.pSubpasses = &subpass;
@@ -886,6 +911,22 @@ private: // 初始化阶段
 			dynamicStateCreateInfo.dynamicStateCount = 2; // same to above
 			dynamicStateCreateInfo.pDynamicStates = dynamicState;
 		}
+
+		// 深度测试与深度图
+		VkPipelineDepthStencilStateCreateInfo depthStencil = {};
+		{
+			depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+
+			depthStencil.depthTestEnable = VK_TRUE; // 是否将新的depth缓冲去与旧的比较，已确定是否丢弃
+			depthStencil.depthWriteEnable = VK_TRUE; // 新的 depth buffer 是否实际写入
+
+			depthStencil.depthCompareOp = VK_COMPARE_OP_LESS; // 保留或丢弃片段的比较细节，less意味着近，新的深度值应该更近
+
+			depthStencil.stencilTestEnable = VK_FALSE;
+			depthStencil.front = {}; // Optional
+			depthStencil.back = {}; // Optional
+		}
+
 		/********************************* Fixed-function State ********************************************/
 
 
@@ -946,6 +987,7 @@ private: // 初始化阶段
 			pipelineCreateInfo.basePipelineHandle = VK_NULL_HANDLE;	//  Optional
 			pipelineCreateInfo.basePipelineIndex = -1;	//  Optional
 
+			pipelineCreateInfo.pDepthStencilState = &depthStencil;
 		}
 
 		// 1. 最终 创建 Pipeline 保存到成员变量, 可以传递多个 pipelineCreateInfo 来创建多个 管线
@@ -959,37 +1001,6 @@ private: // 初始化阶段
 		// Destroy shaders modules to release resources after complete createPipeline
 		vkDestroyShaderModule(m_logicalDevice, fragShaderModule, nullptr);
 		vkDestroyShaderModule(m_logicalDevice, vertShaderModule, nullptr);
-	}
-
-	void createFramebuffers()
-	{
-		m_swapChainFrameBuffers.resize(m_swapChainImageViews.size());
-
-		for (size_t i = 0; i < m_swapChainImageViews.size(); ++i)
-		{
-			VkImageView attachments[] = {
-				m_swapChainImageViews[i]
-			};
-
-			VkFramebufferCreateInfo framebufferInfo = {};
-			{
-				framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-				framebufferInfo.renderPass = m_renderPass;
-
-				framebufferInfo.attachmentCount = 1;
-				framebufferInfo.pAttachments = attachments;	//绑定到相应的附件描述的 VkImageView 对象
-
-				framebufferInfo.width = m_swapChainExtent.width;
-				framebufferInfo.height = m_swapChainExtent.height;
-				framebufferInfo.layers = 1;	// 指定图像组中的层数
-			}
-
-			if (vkCreateFramebuffer(m_logicalDevice, &framebufferInfo, nullptr, &m_swapChainFrameBuffers[i]) != VK_SUCCESS)
-			{
-				throw std::runtime_error("failed to create freamebuffer!");
-			}
-
-		}
 	}
 
 	void createCommandPool()
@@ -1033,7 +1044,54 @@ private: // 初始化阶段
 		/// 我们增加一个函数 findSupportedFormat 从候选格式列表中 根据期望值的降序原则，检测第一个得到支持的格式。
 		/// </summary>
 
-		VkFormat depthFormat = findDepthForamt();
+		// 1. 找到支持的format
+		VkFormat depthFormat = findDepthFormat();
+
+		// 2. 创建 m_depthImage 句柄 和 内存空间
+		createImage(m_swapChainExtent.width, m_swapChainExtent.height, depthFormat,
+					VK_IMAGE_TILING_OPTIMAL,
+					VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+					VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+					m_depthImage, m_depthImageMemory);
+
+		// 3. 创建 深度图对应的 view
+		m_depthImageView = createImageView(m_depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+		// 4. 切换  
+		transitionImageLayout(m_depthImage, depthFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+	}
+
+	void createFramebuffers()
+	{
+		m_swapChainFrameBuffers.resize(m_swapChainImageViews.size());
+
+		for (size_t i = 0; i < m_swapChainImageViews.size(); ++i)
+		{
+			std::array<VkImageView, 2>attachments = {
+				m_swapChainImageViews[i],
+				m_depthImageView
+			};
+
+			VkFramebufferCreateInfo framebufferInfo = {};
+			{
+				framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+				framebufferInfo.renderPass = m_renderPass;
+
+				framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+				framebufferInfo.pAttachments = attachments.data();	//绑定到相应的附件描述的 VkImageView 对象
+
+				framebufferInfo.width = m_swapChainExtent.width;
+				framebufferInfo.height = m_swapChainExtent.height;
+				framebufferInfo.layers = 1;	// 指定图像组中的层数
+			}
+
+			if (vkCreateFramebuffer(m_logicalDevice, &framebufferInfo,
+									nullptr, &m_swapChainFrameBuffers[i]) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create freamebuffer!");
+			}
+
+		}
 	}
 
 	void createTextureImage()
@@ -1083,7 +1141,7 @@ private: // 初始化阶段
 
 	void createTextureImageView()
 	{
-		m_textureImageView = createImageView(m_textureImage, VK_FORMAT_R8G8B8A8_UNORM);
+		m_textureImageView = createImageView(m_textureImage, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
 
 	}
 
@@ -1345,7 +1403,11 @@ private: // 初始化阶段
 
 			// 3. 启动渲染通道
 			VkRenderPassBeginInfo renderPassInfo = {};
-			VkClearValue clearColor;
+			std::array<VkClearValue, 2> clearValues = {};  // 清楚数据
+			{
+				clearValues[0].color = { 0.0f,0.0f,0.0f,1.0f };
+				clearValues[1].depthStencil = { 1.0f,0 }; // 最深为 1.0f， 最近为 0 
+			}
 			{
 				renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 				renderPassInfo.renderPass = m_renderPass;
@@ -1354,9 +1416,8 @@ private: // 初始化阶段
 				renderPassInfo.renderArea.offset = { 0,0 };
 				renderPassInfo.renderArea.extent = m_swapChainExtent;
 
-				clearColor = { 0.0f,0.0f,0.0f,1.0f };
-				renderPassInfo.clearValueCount = 1;
-				renderPassInfo.pClearValues = &clearColor;
+				renderPassInfo.clearValueCount = static_cast<uint32_t> (clearValues.size());
+				renderPassInfo.pClearValues = clearValues.data();
 			}
 
 			vkCmdBeginRenderPass(m_commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE); // S 开启渲染通道
@@ -1432,12 +1493,16 @@ private: // 批量 重定向 操作
 		createImageViews();
 		createRenderPass();
 		createGraphicsPipeline();
+		createDepthResources();
 		createFramebuffers();
 		createCommandBuffers();
 	}
 
 	void cleanupSwapChain()
 	{
+		vkDestroyImageView(m_logicalDevice, m_depthImageView, nullptr);
+		vkDestroyImage(m_logicalDevice, m_depthImage, nullptr);
+		vkFreeMemory(m_logicalDevice, m_depthImageMemory, nullptr);
 
 		for (size_t i = 0; i < m_swapChainFrameBuffers.size(); ++i)
 		{
@@ -1771,7 +1836,6 @@ private: // 抽象出功能函数
 		return true;
 	}
 
-
 	bool checkDeviceExtensionSupport(VkPhysicalDevice device)
 	{
 		uint32_t extensionCount;
@@ -1995,7 +2059,6 @@ private: // 抽象出功能函数
 		endSingleTimeCommands(commandBuffer);
 	}
 
-
 	void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usageBits, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory)
 	{
 		// 创建 成员 VKImage-textureiamge 和 成员 textureMemory 对象
@@ -2048,9 +2111,7 @@ private: // 抽象出功能函数
 
 	}
 
-	VkCommandBuffer beginSingleTimeCommands()
-	{
-		// 分配命令空间
+	VkCommandBuffer beginSingleTimeCommands() {
 		VkCommandBufferAllocateInfo allocInfo = {};
 		{
 			allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -2058,15 +2119,16 @@ private: // 抽象出功能函数
 			allocInfo.commandPool = m_commandPool;
 			allocInfo.commandBufferCount = 1;
 		}
+
 		VkCommandBuffer commandBuffer;
 		vkAllocateCommandBuffers(m_logicalDevice, &allocInfo, &commandBuffer);
 
-		// 开始命令 及 开始记录需要的信息
 		VkCommandBufferBeginInfo beginInfo = {};
 		{
 			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT; // On time 好习惯
+			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 		}
+
 		vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
 		return commandBuffer;
@@ -2110,7 +2172,17 @@ private: // 抽象出功能函数
 
 			barrier.image = image;
 
-			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			if (newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+			{
+				barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+				// 是否支持 stencil
+				if (hasStencilComponent(format)) {
+					barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+				}
+			}
+			else {
+				barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			}
 
 			barrier.subresourceRange.baseMipLevel = 0;
 			barrier.subresourceRange.levelCount = 1;
@@ -2121,23 +2193,31 @@ private: // 抽象出功能函数
 		VkPipelineStageFlags sourceStage;
 		VkPipelineStageFlags destinationStage;
 		{
+			// 从 buffer 到内存
 			if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
 			{
-
 				barrier.srcAccessMask = 0;
 				barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
 				sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 				destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 			}
+			// 从内存 到 设备
 			else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
 			{
-
 				barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 				barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
 				sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 				destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+			}
+			// 从imageView 到 深度图
+			else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+				barrier.srcAccessMask = 0;
+				barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+				sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+				destinationStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
 			}
 			else {
 				throw std::invalid_argument("unsupported layout transition!");
@@ -2181,7 +2261,7 @@ private: // 抽象出功能函数
 		endSingleTimeCommands(commandBuffer);
 	}
 
-	VkImageView createImageView(VkImage image, VkFormat format)
+	VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags)
 	{
 
 		VkImageViewCreateInfo imageViewCreateInfo = {};
@@ -2193,19 +2273,20 @@ private: // 抽象出功能函数
 			imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 			imageViewCreateInfo.format = format;
 
-			//// 颜色通道映射逻辑
-			//imageViewCreateInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-			//imageViewCreateInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-			//imageViewCreateInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-			//imageViewCreateInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+			// 颜色通道映射逻辑
+			imageViewCreateInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+			imageViewCreateInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+			imageViewCreateInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+			imageViewCreateInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
 
 			// Specify target of usage of image
-			imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			imageViewCreateInfo.subresourceRange.aspectMask = aspectFlags;
 			imageViewCreateInfo.subresourceRange.baseMipLevel = 0;
 			imageViewCreateInfo.subresourceRange.levelCount = 1;
 			imageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
 			imageViewCreateInfo.subresourceRange.layerCount = 1;
 		}
+
 		VkImageView imageView;
 
 		if (vkCreateImageView(m_logicalDevice, &imageViewCreateInfo, nullptr, &imageView) != VK_SUCCESS)
@@ -2229,27 +2310,26 @@ private: // 抽象出功能函数
 			/// 	bufferFeatures : 支持缓冲区
 			///  只有前两个在这里是相关的，我们检查取决于函数的 tiling 平铺参数。
 			/// </properties>
-			if (tiling == VK_IMAGE_TILING_LINEAR && (properties.linearTilingFeatures & features) == features)
-			{
+			if (tiling == VK_IMAGE_TILING_LINEAR && (properties.linearTilingFeatures & features) == features) {
 				return format;
 			}
-			else if (tiling == VK_IMAGE_TILING_OPTIMAL && (properties.linearTilingFeatures & features) == features)
-			{
+			else if (tiling == VK_IMAGE_TILING_OPTIMAL && (properties.optimalTilingFeatures & features) == features) {
 				return format;
 			}
 		}
 
-		throwRE("failed to supported foramt!");
+		throw std::runtime_error("failed to find supported format!");
+
 	}
 
-	VkFormat findDepthForamt()
-	{
+	VkFormat findDepthFormat() {
 		return findSupportedFormat(
-			{ VK_FORMAT_D32_SFLOAT,VK_FORMAT_D32_SFLOAT_S8_UINT,VK_FORMAT_D24_UNORM_S8_UINT },
+			{ VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT },
 			VK_IMAGE_TILING_OPTIMAL,
 			VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
 		);
 	}
+
 
 	// foarmat 是否支持 stencil test
 	bool hasStencilComponent(VkFormat format)
