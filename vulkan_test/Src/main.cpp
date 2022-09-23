@@ -11,6 +11,9 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include<stb/stb_iamge.h>
 
+#include<tiny_obj_loader.h>
+
+
 
 #include<set>
 #include<string>
@@ -34,6 +37,10 @@
 
 const int WIDTH = 800;
 const int HEIGTH = 600;
+
+const std::string MODEL_PATH = "models/monkey.obj";
+const std::string TEXTURE_PATH = "textures/texture.jpg";
+
 
 const std::vector<const char*> gb_validationLayers = {
 	"VK_LAYER_KHRONOS_validation",
@@ -117,7 +124,7 @@ struct SwapChainSupportDetails
 };
 
 
-const std::vector<Vertex> gb_vertices = {
+const std::vector<Vertex> m_verticesa = {
 	// 顶点 ， rgb ， texture 四角坐标 （因为opengl绘制而反转了y轴，逆时针输入，顺时针输入则图像翻折）
 	{{ -0.5f, -0.5f,0.0f}, {1.0f, 0.0f, 0.0f},{0.0f,0.0f}},
 	{{ 0.5f, -0.5f,0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f,0.0f}},
@@ -130,7 +137,7 @@ const std::vector<Vertex> gb_vertices = {
 	{{ -0.5f, 0.5f,-0.5f},  {1.0f, 1.0f, 1.0f},{0.0f,1.0f}}
 };
 
-const std::vector<uint16_t> gb_indices = {
+const std::vector<uint16_t> m_indicesa = {
 	0,1,2,0,2,3,
 	4,5,6,4,6,7
 };
@@ -187,6 +194,10 @@ private:
 	VkDescriptorSetLayout m_descriptorSetLayout; //描述符布局组合在一个对象中
 	VkPipelineLayout m_pipelineLayout;	// 管线布局 linera 、 Optimal(tile平铺)·
 
+
+
+	std::vector<Vertex> m_vertices;
+	std::vector<uint32_t> m_indices;
 
 	VkBuffer m_vertexBuffer;
 	VkDeviceMemory m_vertexBufferMemory;
@@ -250,6 +261,7 @@ private:
 		createTextureImageView();
 		createTextureSampler();
 
+		loadModel();
 		createVertexBuffer();
 		createIndexBuffer();
 		createUniformBuffer();
@@ -1100,7 +1112,7 @@ private: // 初始化阶段
 
 		// 导入图片， map、拷贝像素到临时缓冲区， 清除像素
 		int texWidth, texHeight, texChannels;
-		stbi_uc* pixels = stbi_load("Textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+		stbi_uc* pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
 		if (!pixels)
 		{
 			throwRE("failed to load texture image!");
@@ -1190,6 +1202,43 @@ private: // 初始化阶段
 		}
 	}
 
+	void loadModel()
+	{
+		tinyobj::attrib_t attrib;
+		std::vector<tinyobj::shape_t> shapes; // 包含所有单独的对象和面
+		std::vector<tinyobj::material_t> material;
+		std::string warn;
+		std::string err;
+
+		if (!tinyobj::LoadObj(&attrib, &shapes, &material, &warn, &err, MODEL_PATH.c_str()))
+		{
+			throwRE(err);
+		}
+
+		for (const auto& shape : shapes)
+		{
+			for (const auto& index : shape.mesh.indices)
+			{
+				Vertex vertex = {};
+				vertex.pos = {
+					attrib.vertices[3 * index.vertex_index + 0], // 将 float 数组 *3
+					attrib.vertices[3 * index.vertex_index + 1],
+					attrib.vertices[3 * index.vertex_index + 2]
+				};
+				vertex.texCoord = {
+					attrib.texcoords[2 * index.texcoord_index + 0],
+					1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
+				};
+
+				vertex.color = { 1.0f,1.0f,1.0f };
+
+
+				m_vertices.push_back(vertex);
+				m_indices.push_back(m_indices.size());
+			}
+		}
+	}
+
 	void createVertexBuffer()
 	{
 		/*
@@ -1199,7 +1248,7 @@ private: // 初始化阶段
 		这里选用 方法 1
 		*/
 
-		VkDeviceSize buffersize = sizeof(gb_vertices[0]) * gb_vertices.size();  // 要拷贝的顶点数据大小
+		VkDeviceSize buffersize = sizeof(m_vertices[0]) * m_vertices.size();  // 要拷贝的顶点数据大小
 
 		/*************************临时缓冲区： 使用临时的buffer,buffermemory和临时的commandBuffer来提升性能********/
 
@@ -1219,7 +1268,7 @@ private: // 初始化阶段
 		// map 临时 buufer, 把顶点数据拷贝过去
 		void* data;
 		vkMapMemory(m_logicalDevice, stagingBufferMemory, 0, buffersize, 0, &data); // map 到临时内存
-		memcpy(data, gb_vertices.data(), (size_t)buffersize);
+		memcpy(data, m_vertices.data(), (size_t)buffersize);
 		vkUnmapMemory(m_logicalDevice, stagingBufferMemory); // 停止映射
 
 		// 创建 设备上 在 cpu访存上的 map
@@ -1238,7 +1287,7 @@ private: // 初始化阶段
 	void createIndexBuffer()
 	{
 		// 类似于vertex buffer
-		VkDeviceSize bufferSize = sizeof(gb_indices[0]) * gb_indices.size();
+		VkDeviceSize bufferSize = sizeof(m_indices[0]) * m_indices.size();
 
 		VkBuffer stagingBuffer;
 		VkDeviceMemory stagingBufferMemory;
@@ -1246,7 +1295,7 @@ private: // 初始化阶段
 
 		void* data;
 		vkMapMemory(m_logicalDevice, stagingBufferMemory, 0, bufferSize, 0, &data);
-		memcpy(data, gb_indices.data(), (size_t)bufferSize);
+		memcpy(data, m_indices.data(), (size_t)bufferSize);
 		vkUnmapMemory(m_logicalDevice, stagingBufferMemory);
 
 		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_indexBuffer, m_indexBufferMemory);
@@ -1440,10 +1489,10 @@ private: // 初始化阶段
 			VkDeviceSize offsets[] = { 0 };
 
 			/// 绑定顶点缓冲区
-			vkCmdBindVertexBuffers(m_commandBuffers[i], 0, 1, vertexBuffers, offsets);
+			vkCmdBindVertexBuffers(m_commandBuffers[i], 0, 1, &m_vertexBuffer, offsets);
 
 			/// 绑定索引缓冲区
-			vkCmdBindIndexBuffer(m_commandBuffers[i], m_indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+			vkCmdBindIndexBuffer(m_commandBuffers[i], m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
 
 			/// 使用 vkCmdDrawIndexed 替代，复用顶点
@@ -1455,7 +1504,7 @@ private: // 初始化阶段
 				firstVertex : 作为顶点缓冲区的偏移量，定义gl_VertexIndex的最小值。
 				firstInstance : 作为instanced 渲染的偏移量，定义了gl_InstanceIndex的最小值。
 			*/
-			vkCmdDrawIndexed(m_commandBuffers[i], static_cast<uint32_t>(gb_indices.size()), 1, 0, 0, 0);
+			vkCmdDrawIndexed(m_commandBuffers[i], static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
 
 
 			// 5. 结束渲染
@@ -2386,6 +2435,7 @@ int main()
 	//glm::mat4 matrix;
 	//glm::vec4 vec;
 	//auto test = matrix * vec;
+
 
 
 	return EXIT_SUCCESS;
